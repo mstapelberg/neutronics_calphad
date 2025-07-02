@@ -11,6 +11,7 @@ from . import (
     create_model, plot_model, build_library, 
     plot_dose_rate_vs_time, build_manifold
 )
+from .io import cmd_chain_builder
 
 
 def cmd_plot_geometry(args):
@@ -100,6 +101,18 @@ def main():
     manifold_parser.add_argument("-w", "--workers", type=int, default=8,
                                help="Number of parallel workers")
     manifold_parser.set_defaults(func=cmd_build_manifold)
+    
+    # Chain builder command
+    chain_parser = subparsers.add_parser(
+        "chain-builder", 
+        help="Create a depletion chain from ENDF files.",
+        description="Create an OpenMC depletion chain from TENDL, FISPACT, and GEFY data."
+    )
+    chain_parser.add_argument("--neutron-dir", required=True, help="Path to directory with TENDL neutron files.")
+    chain_parser.add_argument("--decay-dir", required=True, help="Path to directory with FISPACT decay files.")
+    chain_parser.add_argument("--fpy-dir", required=True, help="Path to directory with GEFY FPY files.")
+    chain_parser.add_argument("--output-file", default="chain.xml", help="Path to write the output chain file.")
+    chain_parser.set_defaults(func=cmd_chain_builder)
     
     # Full workflow command
     workflow_parser = subparsers.add_parser("run", help="Run complete workflow")

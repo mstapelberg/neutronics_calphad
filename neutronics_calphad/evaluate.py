@@ -2,6 +2,7 @@
 import numpy as np, h5py, json
 import os
 from pathlib import Path
+import warnings
 
 LIB = "elem_lib"
 ELMS = ['V','Cr','Ti','W','Zr']
@@ -24,14 +25,22 @@ except FileNotFoundError:
     CRIT = {"He_appm": 1000, "H_appm": 500}
     print(f"Warning: critical.json not found, using fallback values: {CRIT}")
 
-# Only load library files if they exist
-_library = {}
-for e in ELMS:
-    lib_file = f"{LIB}/{e}/{e}.h5"
-    if os.path.exists(lib_file):
-        _library[e] = h5py.File(lib_file, 'r')
-    else:
-        print(f"Warning: Library file {lib_file} not found. Run 'neutronics-calphad build-library' first.")
+_library = None
+
+def get_library():
+    """Loads the element library on demand and caches it."""
+    global _library
+    if _library is None:
+        _library = {}
+        print("Loading element library...")
+        for e in ELMS:
+            lib_file = f"{LIB}/{e}/{e}.h5"
+            if os.path.exists(lib_file):
+                _library[e] = h5py.File(lib_file, 'r')
+            else:
+                # This warning will now only appear if evaluate is called without the library present
+                warnings.warn(f"Library file {lib_file} not found. Run 'neutronics-calphad build-library' first.")
+    return _library
 
 def evaluate(x):
     """Evaluates the performance of a single alloy composition.
@@ -50,11 +59,12 @@ def evaluate(x):
         dict: A dictionary containing the input composition, calculated dose
         rates, gas production for each isotope, and a boolean 'feasible' flag.
     """
-    if not _library:
-        raise RuntimeError("Element library not loaded. Run 'neutronics-calphad build-library' first.")
+    library = get_library()
+    if not library:
+        raise RuntimeError("Element library is empty or could not be loaded. Run 'neutronics-calphad build-library' first.")
     
-    dose = sum(x[i]*_library[ELMS[i]]['dose'][...] for i in range(5))
-    gases = {iso: sum(x[i]*_library[ELMS[i]][f'gas/{iso}'][...]
+    dose = sum(x[i]*library[ELMS[i]]['dose'][...] for i in range(5))
+    gases = {iso: sum(x[i]*library[ELMS[i]][f'gas/{iso}'][...]
                       for i in range(5))
              for iso in ['He3','He4','H1','H2','H3']}
     

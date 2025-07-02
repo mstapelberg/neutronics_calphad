@@ -79,7 +79,7 @@ def get_reference_dose_rates(element, time_after_shutdown):
 
 def run_element(element,
                 outdir="results/elem_lib",
-                full_chain_file=Path.home() / 'nuclear_data' / 'chain-endf-b8.0.xml',
+                full_chain_file=Path.home() / 'nuclear_data' / 'chain_endfb80_sfr.xml',
                 cross_sections=Path.home() / 'nuclear_data' / 'cross_sections.xml',
                 use_reduced_chain=True,
                 mpi_args=None):
@@ -358,7 +358,7 @@ def run_element(element,
     # Set the chain file for decay photon energy calculations - use absolute path
     openmc.config['chain_file'] = os.path.abspath(chain_file_to_use)
     
-    print(f"\n🔬 Starting photon transport analysis...")
+    print(f"\nStarting photon transport analysis...")
     print(f"   - Chain file set to: {openmc.config['chain_file']}")
     print(f"   - Results file: {results_file}")
     print(f"   - Number of results: {len(results)}")
@@ -461,9 +461,9 @@ def run_element(element,
             decay_photon_energy = activated_mat.get_decay_photon_energy()
             
             if decay_photon_energy is None:
-                print(f"  - ❌ get_decay_photon_energy() returned None")
+                print(f"  - get_decay_photon_energy() returned None")
             else:
-                print(f"  - ✅ Decay photon energy object created")
+                print(f"  - Decay photon energy object created")
                 
                 # Check if it's a valid distribution
                 if hasattr(decay_photon_energy, 'integral'):
@@ -471,13 +471,13 @@ def run_element(element,
                     print(f"  - Total photon rate: {total_photon_rate:.2e} photons/s")
                     
                     if total_photon_rate == 0:
-                        print(f"  - ⚠️  WARNING: Photon rate is exactly zero!")
+                        print(f"  - WARNING: Photon rate is exactly zero!")
                         # Try to understand why
                         if hasattr(decay_photon_energy, 'x') and hasattr(decay_photon_energy, 'p'):
                             print(f"    - Energy bins: {len(decay_photon_energy.x)}")
                             print(f"    - Probability sum: {np.sum(decay_photon_energy.p):.2e}")
                 else:
-                    print(f"  - ❌ Decay photon energy has no 'integral' method")
+                    print(f"  - Decay photon energy has no 'integral' method")
                     print(f"  - Available methods: {[m for m in dir(decay_photon_energy) if not m.startswith('_')]}")
             
             # Get energy spectrum info
@@ -492,13 +492,13 @@ def run_element(element,
                     print(f"DEBUG: No valid energy spectrum data")
             
         except Exception as e:
-            print(f"DEBUG: ❌ Exception getting photon energy distribution: {e}")
+            print(f"DEBUG: Exception getting photon energy distribution: {e}")
             import traceback
             traceback.print_exc()
             decay_photon_energy = None
         
         if decay_photon_energy is None or total_photon_rate == 0:
-            print(f"\n⚠️  WARNING: No decay photons at time {cooling_time} s ({time_label})")
+            print(f"\nWARNING: No decay photons at time {cooling_time} s ({time_label})")
             print(f"    - Appending 0.0 to dose_rates")
             dose_rates.append(0.0)
             continue
@@ -575,12 +575,12 @@ def run_element(element,
             print(f"  - Expected range: {ref_low:.2e} - {ref_high:.2e} µSv/h")
             if average_dose < ref_low:
                 ratio = ref_low / average_dose if average_dose > 0 else float('inf')
-                print(f"  - ⚠️  RESULT TOO LOW by factor of {ratio:.1e}")
+                print(f"  - RESULT TOO LOW by factor of {ratio:.1e}")
             elif average_dose > ref_high:
                 ratio = average_dose / ref_high
-                print(f"  - ⚠️  RESULT TOO HIGH by factor of {ratio:.1e}")
+                print(f"  - RESULT TOO HIGH by factor of {ratio:.1e}")
             else:
-                print(f"  - ✅ Result within expected range")
+                print(f"  - Result within expected range")
             
             dose_rates.append(average_dose)
             
@@ -623,7 +623,7 @@ def run_element(element,
             h.create_dataset(f"gas/{k}", data=v)
     
     # --- Create summary table and plot ---
-    print(f"\n📊 Dose Rate Summary for {element}:")
+    print(f"\nDose Rate Summary for {element}:")
     print("-"*70)
     print(f"{'Time':<20} {'Dose Rate (Sv/h)':<20} {'Reference (Sv/h)':<20} {'Status':<10}")
     print("-"*70)
@@ -668,13 +668,13 @@ def run_element(element,
         
         # Status check
         if dose_Sv == 0:
-            status = "❌ Zero"
+            status = "Zero"
         elif dose_Sv > ref_Sv * 10:
-            status = "⚠️ High"
+            status = "High"
         elif dose_Sv < ref_Sv / 10:
-            status = "⚠️ Low"
+            status = "Low"
         else:
-            status = "✅ OK"
+            status = "OK"
             
         print(f"{time_labels[time_s]:<20} {dose_Sv:<20.2e} {ref_Sv:<20.2e} {status:<10}")
     
@@ -723,7 +723,7 @@ def run_element(element,
     plot_path = os.path.join(element_outdir, f'dose_rate_vs_time_{element}.png')
     plt.savefig(plot_path, dpi=300)
     plt.close()
-    print(f"\n📈 Dose rate plot saved to: {plot_path}")
+    print(f"\nDose rate plot saved to: {plot_path}")
     
     print(f"\nFinished simulation for element: {element}")
 

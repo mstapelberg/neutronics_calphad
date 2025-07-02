@@ -29,6 +29,13 @@ neutronics-calphad plot-geometry V -o results/
 # Build the complete element library (this takes time!)
 neutronics-calphad build-library
 
+# Create a depletion chain file from nuclear data libraries
+neutronics-calphad chain-builder \
+    --neutron-dir /path/to/tendl/neutrons \
+    --decay-dir /path/to/fispact/decay \
+    --fpy-dir /path/to/gefy/fpy \
+    --output-file chain_custom.xml
+
 # Plot dose rate results
 neutronics-calphad plot-dose
 
@@ -68,6 +75,8 @@ nc.build_manifold(n=1000)
 - `neutronics_calphad.evaluate` - Single alloy composition evaluation
 - `neutronics_calphad.manifold` - Design space sampling and evaluation
 - `neutronics_calphad.visualization` - Plotting and visualization tools
+- `neutronics_calphad.io` - Nuclear data I/O and depletion chain generation
+- `neutronics_calphad.calphad` - CALPHAD coupling, batch calculations, and optimization
 
 ## Requirements
 
