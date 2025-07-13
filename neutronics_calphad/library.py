@@ -79,8 +79,8 @@ def get_reference_dose_rates(element, time_after_shutdown):
 
 def run_element(element,
                 outdir="results/elem_lib",
-                full_chain_file=Path.home() / 'nuclear_data' / 'chain_endfb80_sfr.xml',
-                cross_sections=Path.home() / 'nuclear_data' / 'cross_sections.xml',
+                chain_file=None,
+                cross_sections=None,
                 use_reduced_chain=True,
                 mpi_args=None):
     """Runs a full R2S depletion simulation for a single element.
@@ -97,112 +97,71 @@ def run_element(element,
             vacuum vessel (e.g., 'V').
         outdir (str, optional): The root directory for output files.
             Defaults to "elem_lib".
-        full_chain_file (str or Path, optional): Path to the full ENDF-based
-            depletion chain file.
+        chain_file (str or Path, optional): Path to the depletion chain file.
+            If None, checks OPENMC_CHAIN_FILE env var, then defaults.
         cross_sections (str or Path, optional): Path to the cross_sections.xml file.
-        use_reduced_chain (bool, optional): Whether to use a reduced chain that only
-            includes nuclides present in the initial materials. If False, uses the
-            full chain. Defaults to True.
-        mpi_args (list, optional): MPI arguments for parallel execution. 
+            If None, checks OPENMC_CROSS_SECTIONS env var.
+        use_reduced_chain (bool, optional): Whether to use a reduced chain.
+            Defaults to True.
+        mpi_args (list, optional): MPI arguments for parallel execution.
             Example: ['mpiexec', '-n', '8'] for 8 processes. Defaults to None (serial).
     """
     print(f"Running simulation for element: {element}")
-
-    openmc.config['cross_sections'] = str(cross_sections)
     
+    # --- Resolve cross section and chain paths ---
+    if cross_sections:
+        openmc.config['cross_sections'] = str(cross_sections)
+    elif 'OPENMC_CROSS_SECTIONS' in os.environ:
+        openmc.config['cross_sections'] = os.environ['OPENMC_CROSS_SECTIONS']
+    else:
+        raise ValueError("Cross sections must be specified via argument or OPENMC_CROSS_SECTIONS env var.")
+
+    if not chain_file:
+        chain_file = os.environ.get('OPENMC_CHAIN_FILE')
+        if not chain_file:
+            # Provide a default path if not set, but warn the user.
+            default_path = Path.home() / 'nuclear_data' / 'chain_endfb80_sfr.xml'
+            print(f"⚠️ WARNING: `chain_file` not specified and OPENMC_CHAIN_FILE not set.")
+            print(f"    -> Defaulting to '{default_path}'")
+            chain_file = default_path
+
+    print(f"Using Cross Sections: {openmc.config['cross_sections']}")
+    print(f"Using Depletion Chain: {chain_file}")
+
     # Create the OpenMC model for the given element
     model = create_model(element)
 
-    element_outdir = os.path.join(outdir, element)
-    os.makedirs(element_outdir, exist_ok=True)
+    element_outdir = Path(outdir) / element
+    element_outdir.mkdir(parents=True, exist_ok=True)
 
-    # --- Setup depletion chain ---
+    # --- Setup depletion chain (with reduction) ---
     if use_reduced_chain:
-        reduced_chain_path = os.path.join(element_outdir, "reduced_chain.xml")
-        print("Using reduced depletion chain...")
-        initial_nuclides = set()
-        for mat in model.materials:
-            if mat.depletable:
-                initial_nuclides.update(mat.get_nuclides())
+        print("Preparing depletion chain with reduction...")
+        initial_nuclides = {n for mat in model.materials if mat.depletable for n in mat.get_nuclides()}
+        
+        full_chain = openmc.deplete.Chain.from_xml(chain_file)
+        reduced_chain_path = element_outdir / f"reduced_chain_{Path(chain_file).stem}.xml"
 
-        if not os.path.exists(reduced_chain_path):
-            chain = openmc.deplete.Chain.from_xml(full_chain_file)
-            reduced_chain = chain.reduce(list(initial_nuclides))
+        if not reduced_chain_path.exists():
+            print("Generating reduced depletion chain...")
+            reduced_chain = full_chain.reduce(list(initial_nuclides))
             reduced_chain.export_to_xml(reduced_chain_path)
-            print(f"[cache] wrote {reduced_chain_path} "
-                f"({len(reduced_chain.nuclides)} nuclides)")
-            
-            # DEBUG: Check what gas-producing reactions are available
-            print(f"DEBUG: Checking for gas-producing reactions in reduced chain...")
-            gas_products = ['He3', 'He4', 'H1', 'H2', 'H3']
-            for nuc_name in list(initial_nuclides)[:5]:  # Check first 5 nuclides
-                if nuc_name in reduced_chain:
-                    nuc = reduced_chain[nuc_name]
-                    reactions = getattr(nuc, 'reactions', [])
-                    for reaction in reactions:
-                        products = getattr(reaction, 'products', [])
-                        for product in products:
-                            if hasattr(product, 'particle') and product.particle in gas_products:
-                                print(f"  Found gas-producing reaction: {nuc_name} -> {product.particle}")
+            print(f"✅ Wrote reduced chain to {reduced_chain_path} ({len(reduced_chain.nuclides)} nuclides)")
         else:
-            print(f"[cache] using existing {reduced_chain_path}")
-            
-            # DEBUG: Also check existing chain for gas reactions
-            print(f"DEBUG: Checking existing reduced chain for gas reactions...")
-            try:
-                existing_chain = openmc.deplete.Chain.from_xml(reduced_chain_path)
-                gas_products = ['He3', 'He4', 'H1', 'H2', 'H3']
-                gas_reactions_found = 0
-                for nuc_name in list(existing_chain.nuclides)[:10]:  # Check first 10
-                    nuc = existing_chain[nuc_name]
-                    reactions = getattr(nuc, 'reactions', [])
-                    for reaction in reactions:
-                        products = getattr(reaction, 'products', [])
-                        for product in products:
-                            if hasattr(product, 'particle') and product.particle in gas_products:
-                                gas_reactions_found += 1
-                                if gas_reactions_found <= 3:  # Only show first 3
-                                    print(f"  Gas reaction: {nuc_name} -> {product.particle}")
-                print(f"  Total gas-producing reactions found: {gas_reactions_found}")
-            except Exception as e:
-                print(f"  Error reading existing chain: {e}")
+            print(f"ℹ️ Using existing reduced chain: {reduced_chain_path}")
         
         chain_file_to_use = reduced_chain_path
     else:
-        print("Using FULL depletion chain...")
-        chain_file_to_use = full_chain_file
-        
-        # DEBUG: Check what gas-producing reactions are available in full chain
-        print(f"DEBUG: Checking for gas-producing reactions in full chain...")
-        try:
-            full_chain = openmc.deplete.Chain.from_xml(full_chain_file)
-            gas_products = ['He3', 'He4', 'H1', 'H2', 'H3']
-            gas_reactions_found = 0
-            # Check first 100 nuclides from full chain (since it's much larger)
-            for nuc_name in list(full_chain.nuclides)[:100]:
-                nuc = full_chain[nuc_name]
-                reactions = getattr(nuc, 'reactions', [])
-                for reaction in reactions:
-                    products = getattr(reaction, 'products', [])
-                    for product in products:
-                        if hasattr(product, 'particle') and product.particle in gas_products:
-                            gas_reactions_found += 1
-                            if gas_reactions_found <= 5:  # Show first 5
-                                print(f"  Gas reaction: {nuc_name} -> {product.particle}")
-            print(f"  Total gas-producing reactions found (first 100 nuclides): {gas_reactions_found}")
-            print(f"  Full chain contains {len(full_chain.nuclides)} total nuclides")
-        except Exception as e:
-            print(f"  Error reading full chain: {e}")
-    
-    print(f"Chain file to use: {chain_file_to_use}")
-   
+        print("ℹ️ Using full depletion chain as specified.")
+        chain_file_to_use = chain_file
+
     # --- Neutron transport and depletion ---
     model.settings.photon_transport = False
     model.settings.batches = 10
     model.settings.particles = 10000
 
-    depletion_dir = os.path.join(element_outdir, "depletion")
-    os.makedirs(depletion_dir, exist_ok=True)
+    depletion_dir = element_outdir / "depletion"
+    depletion_dir.mkdir(parents=True, exist_ok=True)
     model.settings.output_path = depletion_dir
     
     # Define the irradiation schedule: 1 full power year
@@ -259,7 +218,7 @@ def run_element(element,
         os.chdir(original_cwd)
     
     # --- Extract metrics ---
-    results_file = os.path.join(depletion_dir, "depletion_results.h5")
+    results_file = depletion_dir / "depletion_results.h5"
     results = openmc.deplete.Results(results_file)
     
     # Gas production - Use the correct OpenMC Results API
@@ -516,8 +475,8 @@ def run_element(element,
         model.settings.source = photon_source
         model.settings.particles = 10000
         
-        photon_outdir = os.path.join(element_outdir, f"photon_transport_{cooling_time}s")
-        os.makedirs(photon_outdir, exist_ok=True)
+        photon_outdir = element_outdir / f"photon_transport_{cooling_time}s"
+        photon_outdir.mkdir(parents=True, exist_ok=True)
         
         # Run photon transport with MPI if specified
         if mpi_args:
@@ -610,13 +569,13 @@ def run_element(element,
                     volume_normalization=False,
                     scaling_factor=scaling_factor,
                 )
-                plot.figure.savefig(os.path.join(photon_outdir, f'dose_map_{element}_time_{cooling_time}s.png'))
+                plot.figure.savefig(photon_outdir / f'dose_map_{element}_time_{cooling_time}s.png')
             except Exception as e:
                 print(f"Warning: Could not create dose plot for {element} at time {cooling_time}s: {e}")
                 # Continue without plotting
 
     # --- Store results ---
-    with h5py.File(os.path.join(element_outdir, f"{element}.h5"), "w") as h:
+    with h5py.File(element_outdir / f"{element}.h5", "w") as h:
         h.create_dataset('dose_times', data=np.array(TIMES))
         h.create_dataset('dose', data=np.array(dose_rates))
         for k, v in gases.items():
@@ -720,25 +679,48 @@ def run_element(element,
             ax.axvline(x=time_y, color='gray', linestyle=':', alpha=0.3)
     
     plt.tight_layout()
-    plot_path = os.path.join(element_outdir, f'dose_rate_vs_time_{element}.png')
+    plot_path = element_outdir / f'dose_rate_vs_time_{element}.png'
     plt.savefig(plot_path, dpi=300)
     plt.close()
     print(f"\nDose rate plot saved to: {plot_path}")
     
     print(f"\nFinished simulation for element: {element}")
 
-def build_library(use_reduced_chain=True, mpi_args=None):
-    """Runs the R2S simulation for all elements in the library.
+def build_library(elements=None,
+                  outdir="results/elem_lib",
+                  chain_file=None,
+                  cross_sections=None,
+                  use_reduced_chain=True,
+                  mpi_args=None):
+    """Runs the R2S simulation for all specified elements.
 
-    This function iterates through the global `ELMS` list and calls
+    This function iterates through the given list of elements and calls
     `run_element` for each one, effectively building a library of
     activation results for different materials.
     
     Args:
-        use_reduced_chain (bool, optional): Whether to use reduced chains.
+        elements (list of str, optional): A list of element symbols to run.
+            If None, uses the global ELMS list. Defaults to None.
+        outdir (str, optional): The root directory for output files.
+            Defaults to "elem_lib".
+        chain_file (str or Path, optional): Path to the depletion chain file.
+            Passed to `run_element`.
+        cross_sections (str or Path, optional): Path to the cross_sections.xml file.
+            Passed to `run_element`.
+        use_reduced_chain (bool, optional): Whether to use a reduced chain.
             Defaults to True.
         mpi_args (list, optional): MPI arguments for parallel execution.
             Example: ['mpiexec', '-n', '8']. Defaults to None (serial).
     """
-    for el in ELMS:
-        run_element(el, use_reduced_chain=use_reduced_chain, mpi_args=mpi_args)
+    if elements is None:
+        elements = ELMS
+
+    for el in elements:
+        run_element(
+            el,
+            outdir=outdir,
+            chain_file=chain_file,
+            cross_sections=cross_sections,
+            use_reduced_chain=use_reduced_chain,
+            mpi_args=mpi_args
+        )

@@ -1,0 +1,28 @@
+
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - umap-learn 
+  - cadquery
+  - jupyterlab
+  - openmc
+  - paramak
+  - remove_dagmc_tags
+  - pyvista
+  - pytest # used for testing with pytest
+  - nbformat  # used for testing with pytest
+  - nbconvert  # used for testing with pytest
+  - ipykernel  # used for testing with pytest
+  - jupyter-book
+  - pip
+  - pip:
+    - openmc_source_plotter
+    - openmc_depletion_plotter
+    - openmc_data_downloader
+    - openmc_data
+    - dagmc_geometry_slice_plotter
+    - cad_to_dagmc
+    - openmc-plasma-source
+    - neutronics_material_maker[density]
+    - git+https://github.com/shimwell/pydagmc@packaging-update
