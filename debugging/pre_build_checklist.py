@@ -55,7 +55,8 @@ def run_checklist():
     print("\n3️⃣ Checking Geometry Fix...")
     try:
         from neutronics_calphad.geometry_maker import create_model
-        model = create_model('V')
+        from neutronics_calphad.config import ARC_D_SHAPE
+        model = create_model(ARC_D_SHAPE)
         
         # Check boundary conditions
         surfaces = model.geometry.get_all_surfaces()

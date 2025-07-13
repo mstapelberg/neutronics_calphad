@@ -7,6 +7,7 @@ import openmc
 import numpy as np
 from pathlib import Path
 from neutronics_calphad.geometry_maker import create_model
+from neutronics_calphad.config import ARC_D_SHAPE
 import matplotlib.pyplot as plt
 
 def debug_source_positioning():
@@ -20,12 +21,13 @@ def debug_source_positioning():
     openmc.config['cross_sections'] = str(cross_sections)
     
     # Create model
-    model = create_model('V')
+    config = ARC_D_SHAPE
+    model = create_model(config)
     
     # Get the source
-    source = model.settings.source[0]
-    print(f"Source type: {type(source)}")
-    print(f"Source space type: {type(source.space)}")
+    sources = model.settings.source if isinstance(model.settings.source, list) else [model.settings.source]
+    print(f"Source type: {type(sources[0])}")
+    print(f"Source space type: {type(sources[0].space)}")
     
     # Try to sample from the source directly
     print(f"\n📍 Sampling source particles...")
@@ -34,18 +36,17 @@ def debug_source_positioning():
     try:
         particles = []
         for i in range(100):
-            particle = source[i].sample()
+            s = np.random.choice(sources)
+            particle = s.sample()
             particles.append({
-                'x': particle.r[0],
-                'y': particle.r[1], 
-                'z': particle.r[2],
+                'r': particle.r,
                 'energy': particle.E
             })
         
         if particles:
-            x_coords = [p['x'] for p in particles]
-            y_coords = [p['y'] for p in particles]
-            z_coords = [p['z'] for p in particles]
+            x_coords = [p['r'][0] for p in particles]
+            y_coords = [p['r'][1] for p in particles]
+            z_coords = [p['r'][2] for p in particles]
             energies = [p['energy'] for p in particles]
             
             print(f"  ✅ Sampled {len(particles)} particles successfully")
@@ -59,9 +60,10 @@ def debug_source_positioning():
             print(f"  R range: {min(r_coords):.1f} - {max(r_coords):.1f} cm")
             
             # Check if source is within expected plasma boundaries
-            plasma_r_min = 330 - 113  # major_radius - minor_radius
-            plasma_r_max = 330 + 113  # major_radius + minor_radius
-            plasma_z_max = 1.8 * 113  # elongation * minor_radius
+            geo_config = config['geometry']
+            plasma_r_min = geo_config['major_radius'] - geo_config['minor_radius']
+            plasma_r_max = geo_config['major_radius'] + geo_config['minor_radius']
+            plasma_z_max = geo_config['elongation'] * geo_config['minor_radius']
             
             print(f"\n🏗️ Expected plasma boundaries:")
             print(f"  R: {plasma_r_min:.1f} - {plasma_r_max:.1f} cm")
@@ -97,7 +99,7 @@ def test_simple_point_source():
     openmc.config['cross_sections'] = str(cross_sections)
     
     # Create model but replace source
-    model = create_model('V')
+    model = create_model(ARC_D_SHAPE)
     
     # Create simple point source at plasma center
     point_source = openmc.IndependentSource()

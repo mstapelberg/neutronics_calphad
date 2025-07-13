@@ -9,15 +9,26 @@ from pathlib import Path
 
 from . import (
     create_model, plot_model, build_library, 
-    plot_dose_rate_vs_time, build_manifold
+    plot_dose_rate_vs_time, build_manifold,
+    ARC_D_SHAPE, SPHERICAL
 )
 from .io import cmd_chain_builder
 
 
+CONFIGS = {
+    'arc_d_shape': ARC_D_SHAPE,
+    'spherical': SPHERICAL,
+}
+
 def cmd_plot_geometry(args):
     """Plot geometry for a given element."""
-    print(f"--- Plotting Geometry for {args.element} ---")
-    model = create_model(args.element)
+    print(f"--- Plotting Geometry for {args.config} ---")
+    if args.config not in CONFIGS:
+        print(f"Error: Unknown config '{args.config}'. Available: {list(CONFIGS.keys())}")
+        sys.exit(1)
+    
+    config = CONFIGS[args.config]
+    model = create_model(config)
     plot_model(model, output_dir=args.output_dir)
     print(f"Geometry plot saved to {args.output_dir}")
 
@@ -49,7 +60,7 @@ def cmd_full_workflow(args):
     
     # 1. Plot geometry
     print("\n--- Step 1: Plotting Geometry ---")
-    model = create_model('V')  # Representative element
+    model = create_model(ARC_D_SHAPE)  # Representative element
     plot_model(model, output_dir=args.output_dir)
     
     # 2. Build library
@@ -79,8 +90,8 @@ def main():
     
     # Plot geometry command
     plot_parser = subparsers.add_parser("plot-geometry", help="Plot tokamak geometry")
-    plot_parser.add_argument("element", help="Element symbol (e.g., V, Cr, Ti)")
-    plot_parser.add_argument("-o", "--output-dir", default=".", 
+    plot_parser.add_argument("config", help=f"The geometry configuration to plot. Available: {list(CONFIGS.keys())}")
+    plot_parser.add_argument("-o", "--output-dir", default="results", 
                            help="Output directory for plots")
     plot_parser.set_defaults(func=cmd_plot_geometry)
     

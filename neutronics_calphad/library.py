@@ -10,6 +10,8 @@ from pathlib import Path
 
 from .geometry_maker import create_model
 from openmc_regular_mesh_plotter import plot_mesh_tally
+from .config import ARC_D_SHAPE, ELEMENT_DENSITIES
+import copy
 
 
 ELMS = ['V', 'Cr', 'Ti', 'W', 'Zr']
@@ -78,6 +80,7 @@ def get_reference_dose_rates(element, time_after_shutdown):
     return element_data[closest_time]
 
 def run_element(element,
+                config,
                 outdir="results/elem_lib",
                 chain_file=None,
                 cross_sections=None,
@@ -95,6 +98,7 @@ def run_element(element,
     Args:
         element (str): The chemical symbol of the element to use for the
             vacuum vessel (e.g., 'V').
+        config (dict): The base configuration for the model.
         outdir (str, optional): The root directory for output files.
             Defaults to "elem_lib".
         chain_file (str or Path, optional): Path to the depletion chain file.
@@ -128,8 +132,19 @@ def run_element(element,
     print(f"Using Cross Sections: {openmc.config['cross_sections']}")
     print(f"Using Depletion Chain: {chain_file}")
 
+    # Create a deep copy of the config to modify for the specific element
+    elem_config = copy.deepcopy(config)
+    
+    # Modify the config for the specific element
+    # This assumes the vv material is 'vcrti' and we replace it
+    elem_config['materials']['vcrti'] = {
+        'elements': {element: 1.0},
+        'density': ELEMENT_DENSITIES[element],
+        'depletable': True
+    }
+
     # Create the OpenMC model for the given element
-    model = create_model(element)
+    model = create_model(elem_config)
 
     element_outdir = Path(outdir) / element
     element_outdir.mkdir(parents=True, exist_ok=True)
@@ -222,7 +237,7 @@ def run_element(element,
     results = openmc.deplete.Results(results_file)
     
     # Gas production - Use the correct OpenMC Results API
-    vv_material = get_material_by_name(model.materials, f"vv_{element}")
+    vv_material = get_material_by_name(model.materials, "vcrti")
     
     print(f"DEBUG: Results object methods: {[m for m in dir(results) if not m.startswith('_') and callable(getattr(results, m))]}")
     
@@ -687,12 +702,13 @@ def run_element(element,
     print(f"\nFinished simulation for element: {element}")
 
 def build_library(elements=None,
+                  config=ARC_D_SHAPE,
                   outdir="results/elem_lib",
                   chain_file=None,
                   cross_sections=None,
                   use_reduced_chain=True,
                   mpi_args=None):
-    """Runs the R2S simulation for all specified elements.
+    """Builds a library of depletion results for a list of elements.
 
     This function iterates through the given list of elements and calls
     `run_element` for each one, effectively building a library of
@@ -700,7 +716,9 @@ def build_library(elements=None,
     
     Args:
         elements (list of str, optional): A list of element symbols to run.
-            If None, uses the global ELMS list. Defaults to None.
+            If None, uses the default `ELMS` list. Defaults to None.
+        config (dict, optional): The base model configuration.
+            Defaults to ARC_D_SHAPE.
         outdir (str, optional): The root directory for output files.
             Defaults to "elem_lib".
         chain_file (str or Path, optional): Path to the depletion chain file.
@@ -710,17 +728,33 @@ def build_library(elements=None,
         use_reduced_chain (bool, optional): Whether to use a reduced chain.
             Defaults to True.
         mpi_args (list, optional): MPI arguments for parallel execution.
-            Example: ['mpiexec', '-n', '8']. Defaults to None (serial).
+            Example: ['mpiexec', '-n', '8'] for 8 processes. Defaults to None (serial).
     """
     if elements is None:
         elements = ELMS
-
-    for el in elements:
-        run_element(
-            el,
-            outdir=outdir,
-            chain_file=chain_file,
-            cross_sections=cross_sections,
-            use_reduced_chain=use_reduced_chain,
-            mpi_args=mpi_args
-        )
+    
+    print(f"Building element library for: {', '.join(elements)}")
+    print(f"Using base configuration: {config['geometry']['type']}")
+    
+    for element in elements:
+        print(f"\n{'='*80}")
+        print(f"🚀 Starting element: {element}")
+        print(f"{'='*80}")
+        try:
+            run_element(element,
+                        config=config,
+                        outdir=outdir,
+                        chain_file=chain_file,
+                        cross_sections=cross_sections,
+                        use_reduced_chain=use_reduced_chain,
+                        mpi_args=mpi_args)
+            print(f"\n✅ Successfully completed element: {element}")
+        except Exception as e:
+            print(f"❌ FAILED to complete element: {element}")
+            print(f"  Error: {e}")
+            import traceback
+            traceback.print_exc()
+        print(f"\n{'='*80}")
+        
+    print(f"\n🎉 Library build complete for: {', '.join(elements)}")
+    print(f"Results saved in '{outdir}' directory.")

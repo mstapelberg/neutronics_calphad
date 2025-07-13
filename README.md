@@ -23,8 +23,8 @@ pip install -e ".[dev]"
 After installation, you can use the `neutronics-calphad` command:
 
 ```bash
-# Plot geometry for vanadium
-neutronics-calphad plot-geometry V -o results/
+# Plot geometry for the ARC D-shape configuration
+neutronics-calphad plot-geometry arc_d_shape -o results/
 
 # Build the complete element library (this takes time!)
 neutronics-calphad build-library
@@ -54,7 +54,7 @@ Use from Python scripts or Jupyter notebooks:
 import neutronics_calphad as nc
 
 # Create and plot a model
-model = nc.create_model('V')
+model = nc.create_model(nc.ARC_D_SHAPE)
 nc.plot_model(model, output_dir='results/')
 
 # Build element library

@@ -3,6 +3,7 @@ import numpy as np
 from pathlib import Path
 import os
 from neutronics_calphad.geometry_maker import create_model
+from neutronics_calphad.config import ARC_D_SHAPE
 
 # --- User Configuration ---
 # Option 1: Explicitly set the path to your cross_sections.xml file.
@@ -42,7 +43,7 @@ energy_bins = np.array(energies_list)
 energy_bins = np.sort(energy_bins)
 
 # 2. Create the OpenMC model
-model = create_model('V')
+model = create_model(ARC_D_SHAPE)
 
 # Replace tokamak source with simple isotropic source
 simple_source = openmc.IndependentSource()

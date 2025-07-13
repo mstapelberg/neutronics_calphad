@@ -7,6 +7,7 @@ import openmc
 import numpy as np
 from pathlib import Path
 from neutronics_calphad.geometry_maker import create_model
+from neutronics_calphad.config import ARC_D_SHAPE
 
 def test_simple_source():
     """Test if a simple source in plasma center reaches the VV."""
@@ -19,7 +20,7 @@ def test_simple_source():
     openmc.config['cross_sections'] = str(cross_sections)
     
     # Create model
-    model = create_model('V')
+    model = create_model(ARC_D_SHAPE)
     
     # Replace tokamak source with simple isotropic source
     simple_source = openmc.IndependentSource()

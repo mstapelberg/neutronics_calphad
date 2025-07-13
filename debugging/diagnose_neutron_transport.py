@@ -7,11 +7,13 @@ import openmc
 import numpy as np
 from pathlib import Path
 from neutronics_calphad.geometry_maker import create_model
+from neutronics_calphad.config import ARC_D_SHAPE
 
-def diagnose_neutron_transport(element='V', cross_sections=Path.home() / 'nuclear_data' / 'cross_sections.xml'):
+def diagnose_neutron_transport(config=ARC_D_SHAPE, cross_sections=Path.home() / 'nuclear_data' / 'cross_sections.xml'):
     """Check if neutrons are actually reaching the vacuum vessel."""
     
-    print(f"🔬 Neutron Transport Diagnostics for {element}")
+    element = 'V' # legacy for printing
+    print(f"🔬 Neutron Transport Diagnostics for {config['geometry']['type']} model")
     print("="*60)
     
     # Set cross sections
@@ -19,7 +21,7 @@ def diagnose_neutron_transport(element='V', cross_sections=Path.home() / 'nuclea
     openmc.config['cross_sections'] = str(cross_sections)
     
     # Create model
-    model = create_model(element)
+    model = create_model(config)
     
     # Add neutron flux tallies
     print("Setting up flux tallies...")
@@ -157,28 +159,9 @@ def check_source_energy():
     import math
     
     # Create the same source as in geometry_maker
-    # Revert source to a 90-degree wedge for the quarter torus
-    source = tokamak_source(
-        elongation=1.8,
-        ion_density_centre=1.09e20,
-        ion_density_pedestal=1.09e20,
-        ion_density_peaking_factor=1,
-        ion_density_separatrix=3e19,
-        ion_temperature_centre=45.9e3,
-        ion_temperature_pedestal=6.09e3,
-        ion_temperature_separatrix=0.1e3,
-        ion_temperature_peaking_factor=8.06,
-        ion_temperature_beta=6,
-        major_radius=330,
-        minor_radius=113,
-        pedestal_radius=0.8 * 113,
-        mode="H",
-        shafranov_factor=0.0,
-        angles=(0, math.pi/2),
-        sample_seed=42,
-        triangularity=0.5,
-        fuel={"D": 0.5, "T": 0.5},
-    )
+    config = ARC_D_SHAPE
+    model = create_model(config)
+    source = model.settings.source
     
     print(f"  Source type: Tokamak D-T fusion")
     print(f"  Expected energy: ~14.1 MeV (D-T fusion)")
@@ -189,9 +172,12 @@ def check_source_energy():
     try:
         # This is a bit hacky, but let's see what energies we get
         energies = []
+        sources = source if isinstance(source, list) else [source]
         for i in range(1000):
             try:
-                energy = source[i].energy.sample()
+                # Sample from a random source in the list
+                s = np.random.choice(sources)
+                energy = s.energy.sample()
                 energies.append(energy)
             except:
                 break
@@ -212,5 +198,5 @@ def check_source_energy():
         print(f"    Error sampling energies: {e}")
 
 if __name__ == "__main__":
-    diagnose_neutron_transport('V')
+    diagnose_neutron_transport()
     check_source_energy() 

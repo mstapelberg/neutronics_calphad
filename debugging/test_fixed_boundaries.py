@@ -7,6 +7,7 @@ import openmc
 import numpy as np
 from pathlib import Path
 from neutronics_calphad.geometry_maker import create_model
+from neutronics_calphad.config import ARC_D_SHAPE
 
 def test_fixed_boundaries():
     """Test if the fixed boundaries allow proper neutron transport."""
@@ -19,10 +20,10 @@ def test_fixed_boundaries():
     openmc.config['cross_sections'] = str(cross_sections)
     
     # Create model with fixed boundaries
-    model = create_model('V')
+    model = create_model(ARC_D_SHAPE)
     
     # Use the full tokamak source (not simplified)
-    print(f"Number of sources: {len(model.settings.source)}")
+    print(f"Number of sources: {len(model.settings.source) if isinstance(model.settings.source, list) else 1}")
     print(f"Particles per batch: {model.settings.particles}")
     
     # Keep original settings but add a simple flux tally
@@ -48,7 +49,7 @@ def test_fixed_boundaries():
     print(f"\nRunning simulation with:")
     print(f"  - Fixed vacuum boundaries (outer surfaces)")
     print(f"  - Reflective boundaries (x=0, y=0 planes only)")
-    print(f"  - {len(model.settings.source)} tokamak sources")
+    print(f"  - {len(model.settings.source) if isinstance(model.settings.source, list) else 1} tokamak sources")
     print(f"  - {model.settings.particles} particles per batch")
     
     import tempfile

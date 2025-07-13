@@ -7,8 +7,9 @@ import openmc
 import numpy as np
 from pathlib import Path
 from neutronics_calphad.geometry_maker import create_model
+from neutronics_calphad.config import ARC_D_SHAPE
 
-def check_source_geometry_overlap(element='V'):
+def check_source_geometry_overlap(config=ARC_D_SHAPE):
     """Check if the plasma source overlaps with the geometry correctly."""
     
     print(f"🔬 Source-Geometry Overlap Analysis")
@@ -19,28 +20,32 @@ def check_source_geometry_overlap(element='V'):
     openmc.config['cross_sections'] = str(cross_sections)
     
     # Create model
-    model = create_model(element)
+    model = create_model(config)
     
     # Get source information
-    source = model.settings.source[0] if model.settings.source else None
-    if not source:
+    source = model.settings.source
+    sources = source if isinstance(source, list) else [source]
+
+    if not sources:
         print("❌ No source found in model")
         return
     
     print(f"\n🚀 Source Configuration:")
-    print(f"  Source type: {type(source.space).__name__}")
+    print(f"  Source type: {type(sources[0].space).__name__}")
     
     # Sample source positions
     print(f"\n📍 Sampling source positions...")
     positions = []
     for i in range(1000):
         try:
-            if hasattr(source.space, 'sample'):
-                pos = source.space.sample()
+            # sample from a random source in the list
+            s = np.random.choice(sources)
+            if hasattr(s.space, 'sample'):
+                pos = s.space.sample()
                 positions.append(pos)
             else:
                 # For tokamak source, need to sample differently
-                pos = source.sample()  # This should give us a full particle
+                pos = s.sample()  # This should give us a full particle
                 positions.append([pos.r, pos.phi, pos.z])
         except Exception as e:
             if i == 0:
@@ -110,7 +115,7 @@ def check_neutron_leakage():
     cross_sections = Path.home() / 'nuclear_data' / 'cross_sections.xml'
     openmc.config['cross_sections'] = str(cross_sections)
     
-    model = create_model('V')
+    model = create_model(ARC_D_SHAPE)
     
     # Simple leakage tally
     leakage_tally = openmc.Tally(name='leakage')
@@ -173,6 +178,6 @@ def recommendations():
     print(f"   - Look for undefined regions")
 
 if __name__ == "__main__":
-    check_source_geometry_overlap('V')
+    check_source_geometry_overlap()
     check_neutron_leakage()
     recommendations() 

@@ -2,6 +2,7 @@
 from .geometry_maker import create_model, plot_model
 from .library import build_library
 from .visualization import plot_dose_rate_vs_time
+from .config import ARC_D_SHAPE
 
 def main():
     """Main driver for the neutronics module.
@@ -21,7 +22,7 @@ def main():
     """
     # 1. Plot the geometry for a representative element
     print("--- Plotting Geometry ---")
-    model = create_model('V')
+    model = create_model(ARC_D_SHAPE)
     plot_model(model, output_dir="/home/myless/Packages/neutronics_calphad/results/v_results")
 
     

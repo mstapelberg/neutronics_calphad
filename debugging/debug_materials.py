@@ -10,7 +10,7 @@ def test_materials_api():
     print("Testing materials API...")
     
     # Create a model
-    model = nc.create_model('V')
+    model = nc.create_model(nc.ARC_D_SHAPE)
     
     print(f"Model has {len(model.materials)} materials:")
     for i, mat in enumerate(model.materials):
@@ -20,7 +20,7 @@ def test_materials_api():
     from neutronics_calphad.library import get_material_by_name
     
     try:
-        vv_material = get_material_by_name(model.materials, "vv_V")
+        vv_material = get_material_by_name(model.materials, "vcrti")
         print(f"\nSuccessfully found vacuum vessel material: {vv_material.name}")
         print(f"  Density: {vv_material.density} g/cm³")
         print(f"  Volume: {vv_material.volume} cm³")

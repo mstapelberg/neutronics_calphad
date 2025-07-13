@@ -7,6 +7,7 @@ import openmc
 import numpy as np
 from pathlib import Path
 from neutronics_calphad.geometry_maker import create_model
+from neutronics_calphad.config import ARC_D_SHAPE
 
 def debug_source_positioning():
     """Check where the tokamak source is actually generating neutrons."""
@@ -19,7 +20,8 @@ def debug_source_positioning():
     openmc.config['cross_sections'] = str(cross_sections)
     
     # Create model
-    model = create_model('V')
+    config = ARC_D_SHAPE
+    model = create_model(config)
     
     # Get the source list - tokamak_source returns a list of IndependentSource objects
     sources = model.settings.source
@@ -120,9 +122,10 @@ def debug_source_positioning():
             print(f"  Overall Energy range: {min(energy_ranges):.2e} - {max(energy_ranges):.2e} eV")
         
         # Compare with expected plasma boundaries
-        plasma_r_min = 330 - 113 * 0.9  # Expected source boundaries
-        plasma_r_max = 330 + 113 * 0.9
-        plasma_z_max = 1.8 * 113 * 0.9
+        geo_config = config['geometry']
+        plasma_r_min = geo_config['major_radius'] - geo_config['minor_radius'] * 0.9  # Expected source boundaries
+        plasma_r_max = geo_config['major_radius'] + geo_config['minor_radius'] * 0.9
+        plasma_z_max = geo_config['elongation'] * geo_config['minor_radius'] * 0.9
         
         print(f"\n✅ Source Boundary Check:")
         print(f"  Expected plasma R: {plasma_r_min:.1f} - {plasma_r_max:.1f} cm")
@@ -183,7 +186,7 @@ def check_geometry_problems():
     openmc.config['cross_sections'] = str(cross_sections)
     
     # Create model
-    model = create_model('V')
+    model = create_model(ARC_D_SHAPE)
     
     # Check for common geometry issues
     print("Checking geometry for common issues...")

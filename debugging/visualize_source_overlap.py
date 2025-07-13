@@ -7,6 +7,7 @@ import openmc
 import numpy as np
 from pathlib import Path
 from neutronics_calphad.geometry_maker import create_model
+from neutronics_calphad.config import ARC_D_SHAPE
 import matplotlib.pyplot as plt
 
 def visualize_source_overlap():
@@ -20,7 +21,8 @@ def visualize_source_overlap():
     openmc.config['cross_sections'] = str(cross_sections)
     
     # Create model
-    model = create_model('V')
+    config = ARC_D_SHAPE
+    model = create_model(config)
     
     # Get VV cell bounding box
     vv_cell = model.vv_cell
@@ -60,10 +62,11 @@ def visualize_source_overlap():
         print(f"  Z: {z_min:.1f} to {z_max:.1f} cm")
         
         # Expected plasma/source region
-        plasma_r_min = 330 - 113 * 0.9
-        plasma_r_max = 330 + 113 * 0.9
-        plasma_z_min = -1.8 * 113 * 0.9
-        plasma_z_max = 1.8 * 113 * 0.9
+        geo_config = config['geometry']
+        plasma_r_min = geo_config['major_radius'] - geo_config['minor_radius'] * 0.9
+        plasma_r_max = geo_config['major_radius'] + geo_config['minor_radius'] * 0.9
+        plasma_z_min = -geo_config['elongation'] * geo_config['minor_radius'] * 0.9
+        plasma_z_max = geo_config['elongation'] * geo_config['minor_radius'] * 0.9
         
         # Create visualization
         fig, ax = plt.subplots(figsize=(10, 8))
@@ -134,7 +137,7 @@ def visualize_source_overlap():
             print(f"    Source Z: {z_min:.1f}-{z_max:.1f}, VV Z: {vv_z_min:.1f}-{vv_z_max:.1f}")
         
         if not (r_overlap and z_overlap):
-            print(f"\n❌ SOURCE AND VV DO NOT OVERLAP!")
+            print(f"\n SOURCE AND VV DO NOT OVERLAP!")
             print(f"   This explains why no neutrons reach the VV")
     else:
         print("Could not extract source position data")
