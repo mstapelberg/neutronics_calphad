@@ -8,11 +8,86 @@ from collections import defaultdict
 from io import StringIO
 from pathlib import Path
 import warnings
+import h5py
+import pandas as pd
+import requests
+import numpy as np
 
 import openmc
 import openmc.data
 import openmc.deplete
 from openmc.deplete import Nuclide, FissionYieldDistribution, REACTIONS
+
+def create_ccfe709_h5(data_dir: Path):
+    """Reads CCFE-709 energy boundaries and saves them to HDF5.
+    The source text file is expected to have two header lines followed by
+    comma-separated energy values in eV, typically in descending order. The
+    output HDF5 file will contain datasets for lower and upper energy
+    bounds suitable for OpenMC energy filters.
+    Args:
+        data_dir (Path): The directory containing 'ccfe_709.txt' and
+            where 'ccfe_709.h5' will be saved.
+    """
+    txt_path = data_dir / "ccfe_709.txt"
+    h5_path = data_dir / "ccfe_709.h5"
+
+    if not txt_path.exists():
+        raise FileNotFoundError(
+            f"Source file '{txt_path}' not found. Please ensure it exists, "
+            f"e.g., by running 'cp fispact_comparison/ebins_709 {txt_path}'."
+        )
+
+    with open(txt_path, 'r') as f:
+        lines = f.readlines()
+
+    # Skip header lines, join, and parse comma-separated values
+    data_string = "".join(lines[2:])
+    boundaries = np.array([float(e) for e in data_string.split(',') if e.strip()])
+    boundaries = np.sort(boundaries)  # Ensure ascending order for OpenMC
+
+    with h5py.File(h5_path, 'w') as hf:
+        hf.create_dataset("E_lower", data=boundaries[:-1])
+        hf.create_dataset("E_upper", data=boundaries[1:])
+        hf.create_dataset("group_boundaries", data=boundaries)
+
+    print(f"Successfully created '{h5_path}' with {len(boundaries) - 1} groups.")
+
+def fetch_air_mass_energy_coeffs(data_dir: Path):
+    """Fetches mass-energy absorption coefficients for Air from NIST.
+    Downloads the data from the NIST XCOM database for dry air and saves it
+    to a CSV file. If the download fails, a placeholder file is created.
+    Args:
+        data_dir (Path): The directory where the output
+            'mass_energy_abs_coeff_air.csv' will be saved.
+    """
+    csv_path = data_dir / "mass_energy_abs_coeff_air.csv"
+    url = "https://physics.nist.gov/cgi-bin/Xcom/xcom2"
+    payload = {'Z': '7.218', 'CP': 'Air, Dry (near sea level)', 'NumEn': '200',
+               'Energies': '1.00000-03..2.00000+01', 'Out': '2', 'Graph': '1'}
+
+    try:
+        response = requests.post(url, data=payload)
+        response.raise_for_status()
+        
+        start_marker = "Energy (MeV),mu/rho (cm^2/g),mu_en/rho (cm^2/g)"
+        end_marker = "</pre>"
+        start_index = response.text.find(start_marker)
+        if start_index == -1:
+            raise ValueError("Data start marker not in NIST response.")
+        
+        csv_data = response.text[start_index:response.text.find(end_marker, start_index)].strip()
+        df = pd.read_csv(StringIO(csv_data))
+        df.rename(columns=lambda x: x.strip(), inplace=True)
+        df.to_csv(csv_path, index=False)
+        print(f"Successfully downloaded and saved '{csv_path}'.")
+        
+    except (requests.exceptions.RequestException, ValueError) as e:
+        warnings.warn(f"Failed to fetch data from NIST: {e}. Creating placeholder.")
+        placeholder = {"Energy (MeV)": [1e-3, 1e-2, 1e-1, 1e0, 1e1, 2e1],
+                       "mu/rho (cm^2/g)": [4.7e3, 5.7, 0.16, 0.07, 0.027, 0.022],
+                       "mu_en/rho (cm^2/g)": [4.7e3, 5.0, 0.028, 0.03, 0.022, 0.018]}
+        pd.DataFrame(placeholder).to_csv(csv_path, index=False)
+        print(f"Created placeholder file '{csv_path}'.")
 
 # Helper functions adapted from openmc.deplete.chain
 
@@ -243,8 +318,8 @@ def create_chain(decay_files, fpy_files, neutron_files,
                 nuclide._fpy = _replace_missing_fpy(parent, fpy_data, decay_data)
                 missing_fpy.append((parent, nuclide._fpy))
 
-        if nuclide.reactions or nuclide.decay_modes:
-            chain.add_nuclide(nuclide)
+        #if nuclide.reactions or nuclide.decay_modes:
+        chain.add_nuclide(nuclide)
 
     # Replace missing FPY data
     for nuclide in chain.nuclides:
@@ -305,16 +380,39 @@ def cmd_chain_builder(args):
     print("Chain creation complete.")
 
 
+def cmd_prepare_data(args):
+    """Wrapper function to prepare all necessary data files."""
+    data_path = Path("neutronics_calphad") / "data"
+    data_path.mkdir(exist_ok=True)
+    print("--- Preparing Data Files ---")
+    create_ccfe709_h5(data_path)
+    fetch_air_mass_energy_coeffs(data_path)
+    print("--- Data Preparation Complete ---")
+
+
 def main():
-    """Command-line interface for creating a depletion chain."""
-    parser = argparse.ArgumentParser(description="Create an OpenMC depletion chain from ENDF files.")
-    parser.add_argument("--neutron-dir", required=True, help="Path to directory with TENDL 2021 neutron files.")
-    parser.add_argument("--decay-dir", required=True, help="Path to directory with FISPACT 2020 decay files.")
-    parser.add_argument("--fpy-dir", required=True, help="Path to directory with GEFY 6.1 FPY files.")
-    parser.add_argument("--output-file", default="chain.xml", help="Path to write the output chain file.")
+    """Command-line interface for I/O and data preparation tasks."""
+    parser = argparse.ArgumentParser(description="I/O and data tasks for neutronics_calphad.")
+    subparsers = parser.add_subparsers(dest='command', help='Sub-command help')
+
+    # Sub-parser for the chain builder
+    parser_chain = subparsers.add_parser('build-chain', help='Create an OpenMC depletion chain.')
+    parser_chain.add_argument("--neutron-dir", required=True, help="Path to directory with TENDL neutron files.")
+    parser_chain.add_argument("--decay-dir", required=True, help="Path to directory with FISPACT decay files.")
+    parser_chain.add_argument("--fpy-dir", required=True, help="Path to directory with GEFY FPY files.")
+    parser_chain.add_argument("--output-file", default="chain.xml", help="Path to write the output chain file.")
+    
+    # Sub-parser for data preparation
+    parser_data = subparsers.add_parser('prepare-data', help='Download and process necessary data files.')
 
     args = parser.parse_args()
-    cmd_chain_builder(args)
+    
+    if args.command == 'build-chain':
+        cmd_chain_builder(args)
+    elif args.command == 'prepare-data':
+        cmd_prepare_data(args)
+    else:
+        parser.print_help()
 
 
 if __name__ == '__main__':

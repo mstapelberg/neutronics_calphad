@@ -13,7 +13,7 @@ from .geometry_maker import create_model, plot_model
 from .library import run_element, build_library, ELMS, TIMES
 from .evaluate import evaluate
 from .manifold import sample_simplex, build_manifold
-from .visualization import plot_dose_rate_vs_time, plot_umap
+from .visualization import plot_dose_rate_vs_time, plot_fispact_comparison, plot_umap
 from .config import ARC_D_SHAPE, SPHERICAL
 
 # Import new CALPHAD module components
@@ -47,6 +47,7 @@ __all__ = [
     
     # Visualization
     "plot_dose_rate_vs_time",
+    "plot_fispact_comparison",
     "plot_umap",
     
     # Configs

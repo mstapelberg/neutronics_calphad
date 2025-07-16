@@ -103,13 +103,16 @@ ARC_D_SHAPE = {
 SPHERICAL = {
     'geometry': {
         'type': 'spherical',
-        'radius': 100,
+        'radius': 113,
         'layers': [
-            {'name': 'first_wall', 'thickness': 2, 'material': 'tungsten'},
-            {'name': 'breeder', 'thickness': 50, 'material': 'flibe'},
-            {'name': 'vessel', 'thickness': 5, 'material': 'vcrti'},
+            {'name': 'first_wall', 'thickness': .2, 'material': 'tungsten'},
+            {'name': 'vessel', 'thickness': 2, 'material': 'vcrti'},
+            {'name': 'blanket', 'thickness': 70, 'material': 'flibe'},
+            {'name': 'tank', 'thickness': 5, 'material': 'steel'},
+            {'name': 'shield', 'thickness': 30, 'material': 'boron_carbide'},
         ],
         'bounding_box_pad': 10,
+        'outer_boundary': 'vacuum', # Can be 'vacuum' or 'reflective'
     },
     'materials': {
         'tungsten': {
@@ -124,8 +127,20 @@ SPHERICAL = {
             'depletable': True
         },
         'vcrti': {
-            'elements': {'V': 0.9, 'Cr': 0.05, 'Ti': 0.05},
+            'elements': {'V': 0.8, 'Cr': 0.05, 'Ti': 0.05, 'W': 0.05, 'Zr': 0.05},
             'density': ELEMENT_DENSITIES['V'],
+            'depletable': True
+        },
+        'steel': {
+            'elements': {'Fe': 0.95, 'Cr': 0.18, 'Mn': 0.02, 'Si': 0.01, 'Ni': 0.10, 'Mo': 0.02},
+            'density': ELEMENT_DENSITIES['Fe'],
+            'percent_type': 'ao',
+            'depletable': True
+        },
+        'boron_carbide': {
+            'elements': {'B': 0.8, 'C': 0.2},
+            'density': ELEMENT_DENSITIES['B'],
+            'percent_type': 'ao',
             'depletable': True
         },
     },
@@ -140,6 +155,6 @@ SPHERICAL = {
         'run_mode': "fixed source",
         'batches': 10,
         'inactive': 0,
-        'particles': 10000,
+        'particles': 1000,
     }
 } 

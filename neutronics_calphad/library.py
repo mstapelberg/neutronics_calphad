@@ -3,6 +3,8 @@ import openmc
 import openmc.deplete
 import openmc.lib
 import numpy as np
+import pandas as pd
+from scipy.interpolate import interp1d
 import os
 import h5py
 from matplotlib.colors import LogNorm
@@ -31,6 +33,10 @@ TIMES = [
     25*365*24*3600,       # 25 years
     100*365*24*3600       # 100 years
 ]
+
+# Constants for FISPACT-like calculations
+E_PER_FUSION_eV = 17.6e6  # eV per D-T fusion event
+UNITS_EV_TO_J = 1.60218e-19
 
 def get_material_by_name(materials, name):
     """Helper function to find a material by name."""
@@ -79,38 +85,316 @@ def get_reference_dose_rates(element, time_after_shutdown):
     closest_time = min(element_data.keys(), key=lambda t: abs(t - time_after_shutdown))
     return element_data[closest_time]
 
+def _get_flux_and_microxs(model, chain_file, outdir):
+    """Runs transport, gets flux and microscopic cross sections.
+    Args:
+        model (openmc.Model): The OpenMC model to run.
+        chain_file (str): Path to the depletion chain file.
+        outdir (pathlib.Path): Directory to save output files.
+    Returns:
+        tuple: Paths to the flux HDF5 file and the multi-group cross-section CSV file.
+    """
+    flux_h5 = outdir / "flux.h5"
+    microxs_csv = outdir / "microxs.csv"
+    fispact_flux_file = outdir / "fispact_flux.txt"
+
+    depletable_mats = [m for m in model.materials if m.depletable]
+    if not depletable_mats:
+        raise ValueError("No depletable materials found in the model.")
+
+    flux_list, microxs_list = openmc.deplete.get_microxs_and_flux(
+        model,
+        depletable_mats,
+        energies="UKAEA-1102", # CCFE-709 not available for TENDL21 in FISPACT
+        chain_file=chain_file,
+        run_kwargs={'cwd': str(outdir)}
+    )
+
+    # In the context of run_element, we are interested in the 'vcrti' material
+    try:
+        vcrti_index = [m.name for m in depletable_mats].index('vcrti')
+        flux = flux_list[vcrti_index]
+        microxs = microxs_list[vcrti_index]
+    except ValueError:
+        print("Warning: 'vcrti' material not found. Using the first depletable material.")
+        flux = flux_list[0]
+        microxs = microxs_list[0]
+
+    # Save flux to an HDF5 file for internal use (e.g., collapsing XS)
+    with h5py.File(flux_h5, 'w') as hf:
+        hf.create_dataset('phi', data=flux)
+
+    # Save microxs object to CSV
+    microxs.to_csv(microxs_csv)
+    print(f"Wrote multi-group cross sections to {microxs_csv}")
+    
+    # Save the flux in a FISPACT-readable format
+    with open(fispact_flux_file, 'w') as f:
+        f.write(f"{len(flux)}\n")
+        for f_val in flux:
+            f.write(f"{f_val:.6e}\n")
+    print(f"Wrote FISPACT-readable flux file to {fispact_flux_file}")
+    
+    return flux_h5, microxs_csv
+
+def _collapse_cross_sections(flux_h5, microxs_csv, outdir):
+    """Collapses multi-group cross sections using a given flux spectrum.
+    Args:
+        flux_h5 (pathlib.Path): Path to the HDF5 file with CCFE-709 flux.
+        microxs_csv (pathlib.Path): Path to the OpenMC micro-xs CSV file.
+        outdir (pathlib.Path): Directory to save the output CSV.
+    Returns:
+        pathlib.Path: Path to the output CSV file.
+    """
+    out_csv = outdir / "collapsed_xs.csv"
+    
+    with h5py.File(flux_h5, 'r') as hf:
+        # Assuming single material, flux has shape (1, n_groups)
+        phi_E = hf['phi'][:][0]
+
+    microxs = openmc.deplete.MicroXS.from_csv(microxs_csv)
+    
+    collapsed_data = []
+    sum_phi_E = np.sum(phi_E)
+    if sum_phi_E == 0:
+        raise ValueError("Total flux is zero, cannot normalize.")
+
+    for i, nuc in enumerate(microxs.nuclides):
+        for j, rx in enumerate(microxs.reactions[nuc]):
+            sigma_E = microxs[nuc, rx]
+            sigma_eff = np.sum(sigma_E * phi_E) / sum_phi_E
+            if sigma_eff > 0:
+                collapsed_data.append({
+                    'ZAID': nuc.zaid,
+                    'MT': rx.mt,
+                    'sigma_b': sigma_eff
+                })
+
+    pd.DataFrame(collapsed_data).to_csv(out_csv, index=False)
+    return out_csv
+
+def _run_independent_depletion(model, xs_csv, flux_h5, chain_file, timesteps, power, outdir):
+    """Runs depletion with IndependentOperator.
+    Args:
+        model (openmc.Model): The OpenMC model with initial compositions.
+        xs_csv (pathlib.Path): Path to the collapsed cross-sections CSV file.
+        flux_h5 (pathlib.Path): Path to the HDF5 flux file.
+        chain_file (str): Path to the depletion chain file.
+        timesteps (list): List of irradiation/cooling durations in seconds.
+        power (float): Fusion power in Watts.
+        outdir (pathlib.Path): Directory to save depletion results.
+    Returns:
+        openmc.deplete.Results: The depletion results object.
+    """
+    with h5py.File(flux_h5, 'r') as hf:
+        initial_flux = hf['phi'][:][0]
+
+    micro_xs = openmc.deplete.MicroXS.from_csv(str(xs_csv))
+    
+    op = openmc.deplete.IndependentOperator(
+        materials=model.materials,
+        micro_xs=micro_xs,
+        chain_file=str(chain_file),
+        initial_flux=initial_flux,
+        normalization_mode='source-rate'
+    )
+    
+    source_rate = power / (E_PER_FUSION_eV * UNITS_EV_TO_J)
+    source_rates = [source_rate] + [0.0] * (len(timesteps) - 1)
+
+    integrator = openmc.deplete.CECMIntegrator(op, timesteps, source_rates=source_rates)
+    integrator.integrate(cwd=str(outdir))
+    
+    return openmc.deplete.Results(outdir / "depletion_results.h5")
+
+def _calculate_fispact_dose(results, data_dir):
+    """Calculates dose rate using the FISPACT semi-empirical formula.
+    Args:
+        results (openmc.deplete.Results): Depletion results object.
+        data_dir (pathlib.Path): Path to the data directory containing
+            'mass_energy_abs_coeff_air.csv'.
+    Returns:
+        np.ndarray: Array of dose rates in µSv/h for each cooling step.
+    """
+    coeff_file = data_dir / "mass_energy_abs_coeff_air.csv"
+    if not coeff_file.exists():
+        raise FileNotFoundError(f"Required data file not found: {coeff_file}")
+    
+    coeffs = pd.read_csv(coeff_file)
+    interp_func = interp1d(
+        coeffs["Energy (MeV)"], 
+        coeffs["mu_en/rho (cm^2/g)"],
+        bounds_error=False, 
+        fill_value="extrapolate"
+    )
+
+    dose_rates = []
+    # Skip initial and irradiation steps (indices 0 and 1)
+    for i in range(2, len(results)):
+        mat = results[i].get_material(str(results[i].mat_to_ind.keys()[0]))
+        activities = mat.get_activity(by_nuclide=True, units='Bq')
+        gamma_spec = mat.get_decay_photon_energy()
+
+        if not gamma_spec:
+            dose_rates.append(0.0)
+            continue
+        
+        # Gamma spectrum energies are in eV, convert to MeV
+        energies_mev = gamma_spec.x * 1e-6
+        mu_en_rho = interp_func(energies_mev)
+        
+        # Dose rate formula from FISPACT manual (Eq. 60)
+        # Dose (Sv/h) = 1.602E-13 * 3600 * sum(Activity * Energy * Coeff)
+        # Here we get µSv/h
+        dose_sv_h = 1.602e-13 * 3600 * np.sum(gamma_spec.p * energies_mev * mu_en_rho)
+        dose_usv_h = dose_sv_h * 1e6
+        dose_rates.append(dose_usv_h)
+        
+    return np.array(dose_rates)
+
+
+def _get_fispact_xs(printlib_path, outdir):
+    """Parses a FISPACT printlib file to extract collapsed cross sections.
+
+    This function reads a FISPACT-II `printlib` file, finds the block
+    containing one-group cross-sections, parses the data, and saves it
+    to a CSV file compatible with `openmc.deplete.MicroXS.from_csv`.
+
+    Args:
+        printlib_path (str or Path): Path to the FISPACT printlib file.
+        outdir (pathlib.Path): Directory to save the output CSV.
+
+    Returns:
+        pathlib.Path: Path to the output CSV file with collapsed xs.
+    """
+    import re
+    print(f"Parsing FISPACT printlib file: {printlib_path}")
+    collapsed_data = []
+    in_xs_block = False
+
+    with open(printlib_path, 'r') as f:
+        for line in f:
+            # Block 3 with cross sections starts with this header
+            if "CROSS-SECTIONS FOR ALL REACTIONS" in line:
+                in_xs_block = True
+                # Skip the next 3 header lines to get to the data
+                next(f, None); next(f, None); next(f, None)
+                continue
+
+            if not in_xs_block:
+                continue
+
+            # A blank line or a line with "TOTAL" indicates the end of the block
+            if not line.strip() or "TOTAL" in line:
+                break
+            
+            # Attempt to parse the line. This is based on a common fixed-width format.
+            try:
+                # Example: V 51      102 (n,gamma)         CR 52           1.0945E-02 ...
+                parts = line.split()
+                if len(parts) < 5:
+                    continue
+
+                # The MT number is the first integer that is not the mass number
+                mt = -1
+                for part in parts:
+                    if part.isdigit() and int(part) != int(parts[1]):
+                        mt = int(part)
+                        break
+                if mt == -1:
+                    continue
+
+                # Reconstruct nuclide string, e.g., 'V51', 'Am242m' -> 'Am242_m1'
+                element = parts[0]
+                mass_number = parts[1]
+                nuclide_str = f"{element.capitalize()}{mass_number}"
+                if 'm' in nuclide_str:
+                    nuclide_str = re.sub(r'm(\d*)', r'_m\1', nuclide_str)
+
+                zaid = openmc.Nuclide(nuclide_str).zaid
+                
+                # The cross section is usually the first floating point number
+                # after the reaction string like '(n,gamma)'
+                xs_val = 0.0
+                for part in parts:
+                    try:
+                        if 'E' in part or '.' in part:
+                           val = float(part)
+                           if val >= 0.0:
+                               xs_val = val
+                               break 
+                    except ValueError:
+                        continue
+
+                if xs_val > 0.0:
+                    collapsed_data.append({
+                        'ZAID': zaid,
+                        'MT': mt,
+                        'sigma_b': xs_val
+                    })
+            except (ValueError, IndexError, openmc.exceptions.DataError) as e:
+                if "No data available" not in str(e): # Suppress common benign errors
+                    print(f" could not parse line: '{line.strip()}'. Error: {e}")
+                continue
+
+    if not collapsed_data:
+        raise ValueError(
+            f"Could not parse any cross-section data from {printlib_path}. "
+            "Please check if the file is a valid printlib file containing "
+            "the 'CROSS-SECTIONS FOR ALL REACTIONS' block."
+        )
+
+    out_csv = outdir / "fispact_collapsed_xs.csv"
+    df = pd.DataFrame(collapsed_data)
+    
+    # Remove duplicates that might arise from parsing, keeping the first
+    df = df.drop_duplicates(subset=['ZAID', 'MT'], keep='first')
+    
+    df.to_csv(out_csv, index=False)
+    
+    print(f" Successfully parsed {len(df)} unique cross sections from printlib.")
+    print(f"Saved FISPACT collapsed cross sections to {out_csv}")
+    
+    return out_csv
+
+
 def run_element(element,
                 config,
                 outdir="results/elem_lib",
                 chain_file=None,
                 cross_sections=None,
                 use_reduced_chain=True,
-                mpi_args=None):
-    """Runs a full R2S depletion simulation for a single element.
-
-    This function orchestrates a "Rigorous 2-Step" (R2S) analysis. It first
-    runs a neutron transport and depletion simulation for a specified
-    irradiation period. Then, for several cooling steps, it calculates the
-    decay photon source and runs a photon transport simulation to determine
-    the contact dose rate. Results, including dose rates and gas production,
-    are saved to an HDF5 file.
-
+                mpi_args=None,
+                workflow='r2s',
+                power=500e6,
+                printlib_file=None,
+                debug_particles=None,
+                verbose=False):
+    """Runs a full depletion simulation for a single element.
+    This function can orchestrate multiple workflows:
+    - 'r2s': A "Rigorous 2-Step" analysis with coupled neutron-photon transport.
+    - 'fispact_path_a': A FISPACT-like analysis using pre-calculated fluxes
+      and a semi-empirical dose formula.
+    - 'fispact_path_b': A FISPACT-like depletion with cross sections read from
+      a FISPACT printlib file.
     Args:
-        element (str): The chemical symbol of the element to use for the
-            vacuum vessel (e.g., 'V').
+        element (str): The chemical symbol of the element to use.
         config (dict): The base configuration for the model.
         outdir (str, optional): The root directory for output files.
-            Defaults to "elem_lib".
         chain_file (str or Path, optional): Path to the depletion chain file.
-            If None, checks OPENMC_CHAIN_FILE env var, then defaults.
-        cross_sections (str or Path, optional): Path to the cross_sections.xml file.
-            If None, checks OPENMC_CROSS_SECTIONS env var.
+        cross_sections (str or Path, optional): Path to cross_sections.xml.
         use_reduced_chain (bool, optional): Whether to use a reduced chain.
-            Defaults to True.
         mpi_args (list, optional): MPI arguments for parallel execution.
-            Example: ['mpiexec', '-n', '8'] for 8 processes. Defaults to None (serial).
+        workflow (str, optional): The calculation workflow to use.
+            One of ['r2s', 'fispact_path_a', 'fispact_path_b']. Defaults to 'r2s'.
+        power (float, optional): The fusion power in Watts. Defaults to 500e6.
+        printlib_file (str or Path, optional): Path to a FISPACT printlib file,
+            required for the 'fispact_path_b' workflow.
+        debug_particles (int, optional): If set, overrides the number of
+            particles per batch for a faster, less precise run.
+        verbose (bool, optional): Whether to enable verbose output.
     """
-    print(f"Running simulation for element: {element}")
+    print(f"Running '{workflow}' workflow for element: {element}")
     
     # --- Resolve cross section and chain paths ---
     if cross_sections:
@@ -125,7 +409,7 @@ def run_element(element,
         if not chain_file:
             # Provide a default path if not set, but warn the user.
             default_path = Path.home() / 'nuclear_data' / 'chain_endfb80_sfr.xml'
-            print(f"⚠️ WARNING: `chain_file` not specified and OPENMC_CHAIN_FILE not set.")
+            print(f" WARNING: `chain_file` not specified and OPENMC_CHAIN_FILE not set.")
             print(f"    -> Defaulting to '{default_path}'")
             chain_file = default_path
 
@@ -146,92 +430,123 @@ def run_element(element,
     # Create the OpenMC model for the given element
     model = create_model(elem_config)
 
+    if debug_particles:
+        model.settings.particles = int(debug_particles)
+        print(f"DEBUG: Particle count overridden to {model.settings.particles}")
+
+    if verbose:
+        model.settings.verbosity = 10
+        print(" verbose logging enabled.")
+    else:
+        model.settings.verbosity = 5
+
+
     element_outdir = Path(outdir) / element
     element_outdir.mkdir(parents=True, exist_ok=True)
 
     # --- Setup depletion chain (with reduction) ---
     if use_reduced_chain:
         print("Preparing depletion chain with reduction...")
-        initial_nuclides = {n for mat in model.materials if mat.depletable for n in mat.get_nuclides()}
-        
         full_chain = openmc.deplete.Chain.from_xml(chain_file)
+        
+        # Get all nuclides from the model's depletable materials
+        initial_nuclides = {n for mat in model.materials if mat.depletable for n in mat.get_nuclides()}
+
+        # Filter out nuclides that are in the model but not in the chain.
+        # This is a critical step to prevent errors during reduction.
+        chain_nuclides = set(full_chain.nuclide_dict.keys())
+        nuclides_for_reduction = list(initial_nuclides.intersection(chain_nuclides))
+
+        # Warn about any nuclides that are being ignored
+        missing_from_chain = initial_nuclides.difference(chain_nuclides)
+        if missing_from_chain:
+            print(f"WARNING: The following nuclides are in the model but not in the "
+                  f"depletion chain and will be ignored: {missing_from_chain}")
+
         reduced_chain_path = element_outdir / f"reduced_chain_{Path(chain_file).stem}.xml"
 
         if not reduced_chain_path.exists():
             print("Generating reduced depletion chain...")
-            reduced_chain = full_chain.reduce(list(initial_nuclides))
-            reduced_chain.export_to_xml(reduced_chain_path)
-            print(f"✅ Wrote reduced chain to {reduced_chain_path} ({len(reduced_chain.nuclides)} nuclides)")
+            try:
+                reduced_chain = full_chain.reduce(nuclides_for_reduction)
+                reduced_chain.export_to_xml(reduced_chain_path)
+                print(f" Wrote reduced chain to {reduced_chain_path} ({len(reduced_chain.nuclides)} nuclides)")
+            except KeyError as e:
+                print(f"WARNING: Failed to create reduced chain due to a missing nuclide: {e}")
+                print("         This can happen if a reaction product is not in the base chain.")
+                print("         Falling back to using the full, un-reduced depletion chain.")
+                use_reduced_chain = False
         else:
-            print(f"ℹ️ Using existing reduced chain: {reduced_chain_path}")
-        
-        chain_file_to_use = reduced_chain_path
+            print(f"️ Using existing reduced chain: {reduced_chain_path}")
+    
+    if use_reduced_chain:
+        chain_file_to_use = element_outdir / f"reduced_chain_{Path(chain_file).stem}.xml"
     else:
-        print("ℹ️ Using full depletion chain as specified.")
+        print("Using full depletion chain as specified.")
         chain_file_to_use = chain_file
 
-    # --- Neutron transport and depletion ---
-    model.settings.photon_transport = False
-    model.settings.batches = 10
-    model.settings.particles = 10000
+    # --- Workflow-dependent execution ---
+    if workflow == 'r2s':
+        # --- Neutron transport and depletion (Coupled) ---
+        model.settings.photon_transport = False
+        model.settings.batches = 10
+        model.settings.particles = 10000
 
-    depletion_dir = element_outdir / "depletion"
-    depletion_dir.mkdir(parents=True, exist_ok=True)
-    model.settings.output_path = depletion_dir
-    
-    # Define the irradiation schedule: 1 full power year
-    source_rate = 1e20  # neutrons/s, placeholder value
-    power_days = 365
-    time_steps = [power_days * 24 * 3600]
-    source_rates = [source_rate]
+        depletion_dir = element_outdir / "depletion_r2s"
+        depletion_dir.mkdir(parents=True, exist_ok=True)
+        model.settings.output_path = depletion_dir
+        
+        source_rate = power / (E_PER_FUSION_eV * UNITS_EV_TO_J)
+        source_rates = [source_rate] + [0.0] * (len(TIMES) - 1)
 
-    # Add cooling steps - convert absolute cooling times to step durations
-    print(f"\nDEBUG: Setting up time steps:")
-    print(f"  Irradiation duration: {time_steps[0]:.0f} s")
-    
-    previous_time = 0
-    for i, target_cooling_time in enumerate(TIMES):
-        step_duration = target_cooling_time - previous_time
-        time_steps.append(step_duration)
-        source_rates.append(0)
-        previous_time = target_cooling_time
-        print(f"  Cooling step {i+1}: duration {step_duration:.0f}s (total cooling: {target_cooling_time:.0f}s)")
-    
-    print(f"  Total time steps: {len(time_steps)}")
-    print(f"  Time step durations: {[f'{t:.0f}s' for t in time_steps]}")
+        operator = openmc.deplete.CoupledOperator(
+            model,
+            chain_file=chain_file_to_use,
+            normalization_mode='source-rate',
+        )
+        
+        integrator = openmc.deplete.PredictorIntegrator(
+            operator, TIMES, source_rates=source_rates)
+        
+        original_cwd = os.getcwd()
+        os.chdir(depletion_dir)
+        try:
+            integrator.integrate()
+        finally:
+            os.chdir(original_cwd)
+        
+        results = openmc.deplete.Results(depletion_dir / "depletion_results.h5")
+        # TODO: Refactor photon transport logic here for R2S dose calc
+        dose_rates = [0.0] * len(TIMES) # Placeholder
 
-    # Setup the depletion chain using the selected chain
-    operator = openmc.deplete.CoupledOperator(
-        model,
-        chain_file=chain_file_to_use,
-        normalization_mode='source-rate',
-    )
-    
-    # Note: MPI is not supported for depletion integration - only for neutronics transport
-    if mpi_args:
-        print(f"DEBUG: MPI args provided ({mpi_args}) but depletion integration runs in serial")
-        print(f"DEBUG: MPI will only be used for photon transport calculations")
-    
-    integrator = openmc.deplete.PredictorIntegrator(
-        operator,
-        time_steps,
-        source_rates=source_rates,
-    )
-    
-    # Change working directory to depletion_dir and run integration
-    original_cwd = os.getcwd()
-    os.chdir(depletion_dir)
-    
-    try:
-        print(f"\nDEBUG: Starting neutron irradiation for {element}")
-        print(f"  - Irradiation time: {power_days} days = {time_steps[0]:.2e} seconds")
-        print(f"  - Source rate: {source_rate:.2e} neutrons/s")
-        print(f"  - Number of time steps: {len(time_steps)}")
-        integrator.integrate()
-        print(f"  -  Neutron depletion integration completed")
-    finally:
-        os.chdir(original_cwd)
-    
+    elif workflow in ['fispact_path_a', 'fispact_path_b']:
+        depletion_dir = element_outdir / "depletion_independent"
+        depletion_dir.mkdir(parents=True, exist_ok=True)
+        
+        flux_h5, microxs_csv = _get_flux_and_microxs(model, chain_file_to_use, depletion_dir)
+
+        if workflow == 'fispact_path_a':
+            xs_csv = _collapse_cross_sections(flux_h5, microxs_csv, depletion_dir)
+        else:  # fispact_path_b
+            if not printlib_file:
+                raise ValueError("The 'fispact_path_b' workflow requires a `printlib_file`.")
+            print(f"Using FISPACT cross sections from: {printlib_file}")
+            xs_csv = _get_fispact_xs(printlib_file, depletion_dir)
+
+        results = _run_independent_depletion(
+            model, xs_csv, flux_h5, chain_file_to_use, TIMES, power, depletion_dir
+        )
+        
+        if workflow == 'fispact_path_a':
+            # Assumes 'data' dir is sibling to 'neutronics_calphad'
+            data_dir = Path(__file__).parent.parent / 'data'
+            dose_rates = _calculate_fispact_dose(results, data_dir)
+        else: # fispact_path_b
+            # TODO: Refactor photon transport logic here
+            dose_rates = [0.0] * len(TIMES) # Placeholder
+    else:
+        raise ValueError(f"Unknown workflow: {workflow}")
+
     # --- Extract metrics ---
     results_file = depletion_dir / "depletion_results.h5"
     results = openmc.deplete.Results(results_file)
@@ -362,7 +677,7 @@ def run_element(element,
     print(f"\nDEBUG: Starting photon transport calculations...")
     print(f"  Processing {len(TIMES)} cooling time steps")
     
-    for i in range(1, len(time_steps)): # Skip the irradiation step (index 0)
+    for i in range(1, len(TIMES)): # Skip the irradiation step (index 0)
         cooling_time = TIMES[i-1]  # TIMES[0] corresponds to results[2], etc.
         result_index = i + 1  # Correct index: results[0]=initial, results[1]=after irradiation, results[2]=first cooling, etc.
         time_label = f"{cooling_time} s"
@@ -584,13 +899,14 @@ def run_element(element,
                     volume_normalization=False,
                     scaling_factor=scaling_factor,
                 )
-                plot.figure.savefig(photon_outdir / f'dose_map_{element}_time_{cooling_time}s.png')
+                plot.figure.savefig(photon_outdir / f'dose_map_{element}_{workflow}_time_{cooling_time}s.png')
             except Exception as e:
                 print(f"Warning: Could not create dose plot for {element} at time {cooling_time}s: {e}")
                 # Continue without plotting
 
     # --- Store results ---
-    with h5py.File(element_outdir / f"{element}.h5", "w") as h:
+    output_filename = f"{element}_{workflow}.h5"
+    with h5py.File(element_outdir / output_filename, "w") as h:
         h.create_dataset('dose_times', data=np.array(TIMES))
         h.create_dataset('dose', data=np.array(dose_rates))
         for k, v in gases.items():
@@ -702,12 +1018,17 @@ def run_element(element,
     print(f"\nFinished simulation for element: {element}")
 
 def build_library(elements=None,
-                  config=ARC_D_SHAPE,
+                  config=None,
                   outdir="results/elem_lib",
                   chain_file=None,
                   cross_sections=None,
                   use_reduced_chain=True,
-                  mpi_args=None):
+                  mpi_args=None,
+                  workflow='r2s',
+                  power=500e6,
+                  printlib_file=None,
+                  debug_particles=None,
+                  verbose=False):
     """Builds a library of depletion results for a list of elements.
 
     This function iterates through the given list of elements and calls
@@ -718,7 +1039,7 @@ def build_library(elements=None,
         elements (list of str, optional): A list of element symbols to run.
             If None, uses the default `ELMS` list. Defaults to None.
         config (dict, optional): The base model configuration.
-            Defaults to ARC_D_SHAPE.
+            If None, defaults to ARC_D_SHAPE.
         outdir (str, optional): The root directory for output files.
             Defaults to "elem_lib".
         chain_file (str or Path, optional): Path to the depletion chain file.
@@ -729,16 +1050,33 @@ def build_library(elements=None,
             Defaults to True.
         mpi_args (list, optional): MPI arguments for parallel execution.
             Example: ['mpiexec', '-n', '8'] for 8 processes. Defaults to None (serial).
+        workflow (str, optional): The calculation workflow to use.
+            Passed to `run_element`.
+        power (float, optional): The fusion power in Watts.
+            Passed to `run_element`.
+        printlib_file (str or Path, optional): Path to a FISPACT printlib file.
+            Passed to `run_element`.
+        debug_particles (int, optional): If set, overrides the number of
+            particles per batch for a faster, less precise run.
+        verbose (bool, optional): Whether to enable verbose output.
     """
     if elements is None:
         elements = ELMS
     
+    if config is None:
+        from .config import ARC_D_SHAPE
+        config = ARC_D_SHAPE
+        config_name = 'arc_d_shape'
+    else:
+        # Attempt to find the name of the config for logging
+        config_name = config.get('geometry', {}).get('type', 'custom')
+
     print(f"Building element library for: {', '.join(elements)}")
-    print(f"Using base configuration: {config['geometry']['type']}")
+    print(f"Using base configuration: {config_name}")
     
     for element in elements:
         print(f"\n{'='*80}")
-        print(f"🚀 Starting element: {element}")
+        print(f" Starting element: {element}")
         print(f"{'='*80}")
         try:
             run_element(element,
@@ -747,14 +1085,19 @@ def build_library(elements=None,
                         chain_file=chain_file,
                         cross_sections=cross_sections,
                         use_reduced_chain=use_reduced_chain,
-                        mpi_args=mpi_args)
-            print(f"\n✅ Successfully completed element: {element}")
+                        mpi_args=mpi_args,
+                        workflow=workflow,
+                        power=power,
+                        printlib_file=printlib_file,
+                        debug_particles=debug_particles,
+                        verbose=verbose)
+            print(f"\n Successfully completed element: {element}")
         except Exception as e:
-            print(f"❌ FAILED to complete element: {element}")
+            print(f" FAILED to complete element: {element}")
             print(f"  Error: {e}")
             import traceback
             traceback.print_exc()
         print(f"\n{'='*80}")
         
-    print(f"\n🎉 Library build complete for: {', '.join(elements)}")
+    print(f"\n Library build complete for: {', '.join(elements)}")
     print(f"Results saved in '{outdir}' directory.")

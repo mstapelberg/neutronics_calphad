@@ -194,34 +194,36 @@ def _build_spherical_geometry(config: dict, materials: dict):
     """Builds a spherical geometry from a configuration dictionary."""
     geo_config = config['geometry']
     layers = geo_config['layers']
-    
+    inner_radius = geo_config.get('radius', 0)
+
+    # Create surfaces for each layer boundary, starting from the inner radius
     surfaces = []
-    current_radius = 0
+    current_radius = inner_radius
+    # The first surface is at the inner radius (or 0)
+    surfaces.append(openmc.Sphere(r=current_radius))
+    # Subsequent surfaces are the outer boundaries of each layer
     for layer in layers:
         current_radius += layer['thickness']
         surfaces.append(openmc.Sphere(r=current_radius))
-        
+
     # Bounding sphere
-    pad = geo_config['bounding_box_pad']
-    bounding_sphere = openmc.Sphere(r=current_radius + pad, boundary_type='vacuum')
+    pad = geo_config.get('bounding_box_pad', 10)
+    outer_boundary_type = geo_config.get('outer_boundary', 'vacuum')
+    bounding_sphere = openmc.Sphere(r=current_radius + pad, boundary_type=outer_boundary_type)
 
     # Create cells
     cells = []
-    # Core (plasma or void)
-    cells.append(openmc.Cell(region=-surfaces[0], name='core'))
+    # Core (plasma or void) is inside the first surface
+    if inner_radius > 0:
+        cells.append(openmc.Cell(region=-surfaces[0], name='core'))
 
-    for i in range(len(surfaces) - 1):
+    # Material layers are shells between subsequent surfaces
+    for i, layer in enumerate(layers):
         region = -surfaces[i+1] & +surfaces[i]
-        layer_info = layers[i]
-        cell = openmc.Cell(region=region, fill=materials[layer_info['material']], name=layer_info['name'])
+        cell = openmc.Cell(region=region, fill=materials[layer['material']], name=layer['name'])
         cells.append(cell)
-        
-    # Last layer
-    last_layer_info = layers[-1]
-    last_layer_region = -surfaces[-1] & +surfaces[-2] if len(surfaces) > 1 else -surfaces[0]
-    cells.append(openmc.Cell(region=last_layer_region, fill=materials[last_layer_info['material']], name=last_layer_info['name']))
 
-    # Void cell
+    # Void cell outside the last layer up to the bounding sphere
     void_region = -bounding_sphere & +surfaces[-1]
     cells.append(openmc.Cell(region=void_region, name='void'))
 
@@ -229,11 +231,12 @@ def _build_spherical_geometry(config: dict, materials: dict):
     geometry = openmc.Geometry(universe)
     
     # Set volumes
-    current_radius = 0
+    current_radius = inner_radius
     for layer in layers:
         outer_r = current_radius + layer['thickness']
         volume = 4/3 * math.pi * (outer_r**3 - current_radius**3)
-        materials[layer['material']].volume = volume
+        if layer['material'] in materials:
+            materials[layer['material']].volume = volume
         current_radius = outer_r
         
     return geometry

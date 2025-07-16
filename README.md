@@ -26,8 +26,14 @@ After installation, you can use the `neutronics-calphad` command:
 # Plot geometry for the ARC D-shape configuration
 neutronics-calphad plot-geometry arc_d_shape -o results/
 
-# Build the complete element library (this takes time!)
+# Build the complete element library using the default R2S workflow
 neutronics-calphad build-library
+
+# Build the library using the FISPACT Path A workflow
+neutronics-calphad build-library --workflow fispact_path_a --power 500e6
+
+# Prepare data files (e.g., for FISPACT dose calculation)
+neutronics-calphad prepare-data
 
 # Create a depletion chain file from nuclear data libraries
 neutronics-calphad chain-builder \
@@ -38,6 +44,12 @@ neutronics-calphad chain-builder \
 
 # Plot dose rate results
 neutronics-calphad plot-dose
+
+# Compare dose rates from different workflows
+neutronics-calphad compare-dose \
+    --fispact-output path/to/fispact.lis \
+    --path-a-results path/to/results_path_a.h5 \
+    --path-b-results path/to/results_path_b.h5
 
 # Build alloy performance manifold
 neutronics-calphad build-manifold -n 5000
@@ -61,7 +73,7 @@ nc.plot_model(model, output_dir='results/')
 nc.build_library()
 
 # Evaluate an alloy composition
-composition = [0.5, 0.2, 0.1, 0.1, 0.1]  # V-Cr-Ti-W-Zr
+composition = [0.8, 0.05, 0.05, 0.05, 0.05]  # V-Cr-Ti-W-Zr
 result = nc.evaluate(composition)
 
 # Sample and evaluate many compositions
@@ -75,7 +87,7 @@ nc.build_manifold(n=1000)
 - `neutronics_calphad.evaluate` - Single alloy composition evaluation
 - `neutronics_calphad.manifold` - Design space sampling and evaluation
 - `neutronics_calphad.visualization` - Plotting and visualization tools
-- `neutronics_calphad.io` - Nuclear data I/O and depletion chain generation
+- `neutronics_calphad.io` - Nuclear data I/O, data preparation, and depletion chain generation
 - `neutronics_calphad.calphad` - CALPHAD coupling, batch calculations, and optimization
 
 ## Requirements

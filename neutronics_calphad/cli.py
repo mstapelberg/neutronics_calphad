@@ -10,9 +10,10 @@ from pathlib import Path
 from . import (
     create_model, plot_model, build_library, 
     plot_dose_rate_vs_time, build_manifold,
+    plot_fispact_comparison,
     ARC_D_SHAPE, SPHERICAL
 )
-from .io import cmd_chain_builder
+from .io import cmd_chain_builder, cmd_prepare_data
 
 
 CONFIGS = {
@@ -35,8 +36,26 @@ def cmd_plot_geometry(args):
 
 def cmd_build_library(args):
     """Build the element library."""
-    print("--- Building Element Library ---")
-    build_library()
+    print(f"--- Building Element Library (Workflow: {args.workflow}, Config: {args.config}) ---")
+    config = CONFIGS.get(args.config)
+    if not config:
+        print(f"Error: Unknown config '{args.config}'. Available: {list(CONFIGS.keys())}")
+        sys.exit(1)
+    
+    elements_to_run = [args.element] if args.element else None
+    
+    build_library(
+        elements=elements_to_run,
+        config=config, 
+        workflow=args.workflow, 
+        power=args.power, 
+        printlib_file=args.printlib_file, 
+        verbose=args.verbose, 
+        cross_sections=args.cross_sections, 
+        chain_file=args.chain_file,
+        use_reduced_chain=not args.no_reduce_chain,
+        debug_particles=args.debug_particles
+    )
     print("Library building complete!")
 
 
@@ -54,18 +73,34 @@ def cmd_build_manifold(args):
     print(f"Manifold with {len(df)} samples saved to manifold.parquet")
 
 
+def cmd_compare_dose(args):
+    """Compare FISPACT and OpenMC dose rate results."""
+    print("--- Comparing Dose Rate Results ---")
+    plot_fispact_comparison(
+        fispact_output=args.fispact_output,
+        path_a_results=args.path_a_results,
+        path_b_results=args.path_b_results,
+        output_dir=args.output_dir
+    )
+
 def cmd_full_workflow(args):
     """Run the complete workflow."""
     print("=== Full Neutronics-CALPHAD Workflow ===")
     
+    # 0. Select config
+    config = CONFIGS.get(args.config)
+    if not config:
+        print(f"Error: Unknown config '{args.config}'. Available: {list(CONFIGS.keys())}")
+        sys.exit(1)
+
     # 1. Plot geometry
-    print("\n--- Step 1: Plotting Geometry ---")
-    model = create_model(ARC_D_SHAPE)  # Representative element
+    print(f"\n--- Step 1: Plotting Geometry ({args.config}) ---")
+    model = create_model(config)
     plot_model(model, output_dir=args.output_dir)
     
     # 2. Build library
     print("\n--- Step 2: Building Element Library ---")
-    build_library()
+    build_library(config=config, workflow=args.workflow, power=args.power, printlib_file=args.printlib_file, verbose=args.verbose, cross_sections=args.cross_sections, chain_file=args.chain_file)
     
     # 3. Plot results
     print("\n--- Step 3: Plotting Dose Rate vs. Time ---")
@@ -97,6 +132,35 @@ def main():
     
     # Build library command
     lib_parser = subparsers.add_parser("build-library", help="Build element library")
+    lib_parser.add_argument(
+        "--config",
+        choices=CONFIGS.keys(),
+        default='arc_d_shape',
+        help="The geometry and material configuration to use."
+    )
+    lib_parser.add_argument(
+        "--workflow", 
+        choices=['r2s', 'fispact_path_a', 'fispact_path_b'],
+        default='r2s',
+        help="The calculation workflow to use."
+    )
+    lib_parser.add_argument(
+        "--power",
+        type=float,
+        default=500e6,
+        help="Fusion power in Watts for normalization."
+    )
+    lib_parser.add_argument(
+        "--printlib-file",
+        default=None,
+        help="Path to the FISPACT printlib file for 'fispact_path_b' workflow."
+    )
+    lib_parser.add_argument("--cross-sections", default=None, help="Path to cross_sections.xml file.")
+    lib_parser.add_argument("--chain-file", default=None, help="Path to depletion chain XML file.")
+    lib_parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output during simulations.")
+    lib_parser.add_argument("--no-reduce-chain", action="store_true", help="Disable depletion chain reduction.")
+    lib_parser.add_argument("--element", type=str, default=None, help="Specify a single element to run for debugging.")
+    lib_parser.add_argument("--debug-particles", type=int, default=None, help="Override particle count for quick debugging.")
     lib_parser.set_defaults(func=cmd_build_library)
     
     # Plot dose command
@@ -105,6 +169,14 @@ def main():
                            help="Results directory containing element data")
     dose_parser.set_defaults(func=cmd_plot_dose)
     
+    # Compare dose command
+    compare_parser = subparsers.add_parser("compare-dose", help="Compare FISPACT and OpenMC dose rates.")
+    compare_parser.add_argument("--fispact-output", required=True, help="Path to FISPACT .lis output file.")
+    compare_parser.add_argument("--path-a-results", required=True, help="Path to Path A HDF5 results file.")
+    compare_parser.add_argument("--path-b-results", required=True, help="Path to Path B HDF5 results file.")
+    compare_parser.add_argument("-o", "--output-dir", default="results", help="Output directory for the plot.")
+    compare_parser.set_defaults(func=cmd_compare_dose)
+
     # Build manifold command
     manifold_parser = subparsers.add_parser("build-manifold", help="Build alloy manifold")
     manifold_parser.add_argument("-n", "--samples", type=int, default=15000,
@@ -125,10 +197,40 @@ def main():
     chain_parser.add_argument("--output-file", default="chain.xml", help="Path to write the output chain file.")
     chain_parser.set_defaults(func=cmd_chain_builder)
     
+    # Data preparation command
+    data_parser = subparsers.add_parser('prepare-data', help='Download and process necessary data files.')
+    data_parser.set_defaults(func=cmd_prepare_data)
+
     # Full workflow command
     workflow_parser = subparsers.add_parser("run", help="Run complete workflow")
+    workflow_parser.add_argument(
+        "--config",
+        choices=CONFIGS.keys(),
+        default='arc_d_shape',
+        help="The geometry and material configuration to use."
+    )
     workflow_parser.add_argument("-o", "--output-dir", default="results",
                                 help="Output directory for plots")
+    workflow_parser.add_argument(
+        "--workflow", 
+        choices=['r2s', 'fispact_path_a', 'fispact_path_b'],
+        default='r2s',
+        help="The calculation workflow to use for the library build step."
+    )
+    workflow_parser.add_argument(
+        "--power",
+        type=float,
+        default=500e6,
+        help="Fusion power in Watts for normalization."
+    )
+    workflow_parser.add_argument(
+        "--printlib-file",
+        default=None,
+        help="Path to the FISPACT printlib file for 'fispact_path_b' workflow."
+    )
+    workflow_parser.add_argument("--cross-sections", default=None, help="Path to cross_sections.xml file.")
+    workflow_parser.add_argument("--chain-file", default=None, help="Path to depletion chain XML file.")
+    workflow_parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output during simulations.")
     workflow_parser.add_argument("--build-manifold", action="store_true",
                                 help="Also build alloy manifold")
     workflow_parser.add_argument("--manifold-samples", type=int, default=15000,
@@ -144,14 +246,14 @@ def main():
         parser.print_help()
         sys.exit(1)
     
-    try:
+    # In Python 3.7+, the 'dest' argument to add_subparsers is required.
+    # We check if 'func' is present, as it's set by set_defaults.
+    if hasattr(args, 'func'):
         args.func(args)
-    except KeyboardInterrupt:
-        print("\nInterrupted by user")
-        sys.exit(1)
-    except Exception as e:
-        print(f"Error: {e}")
-        sys.exit(1)
+    else:
+        # If no subcommand was specified, and we are not handling it above,
+        # it's good practice to show help.
+        parser.print_help()
 
 
 if __name__ == "__main__":
