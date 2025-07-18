@@ -389,9 +389,10 @@ def plot_model(model: openmc.Model, output_dir: str = "."):
         sources = model.settings.source if isinstance(model.settings.source, list) else [model.settings.source]
         for source in sources:
             if hasattr(source, 'space') and isinstance(source.space, openmc.stats.Point):
-                 x_coords.append(source.space.x)
-                 y_coords.append(source.space.y)
-                 z_coords.append(source.space.z)
+                 coords = source.space.xyz
+                 x_coords.append(coords[0])
+                 y_coords.append(coords[1])
+                 z_coords.append(coords[2])
             else: # Tokamak source
                 # This part is tricky as tokamak_source is a composite source
                 # For visualization, we just show the major radius

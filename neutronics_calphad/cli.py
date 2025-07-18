@@ -10,7 +10,7 @@ from pathlib import Path
 from . import (
     create_model, plot_model, build_library, 
     plot_dose_rate_vs_time, build_manifold,
-    plot_fispact_comparison,
+    plot_fispact_comparison, plot_fispact_flux,
     ARC_D_SHAPE, SPHERICAL
 )
 from .io import cmd_chain_builder, cmd_prepare_data
@@ -83,6 +83,26 @@ def cmd_compare_dose(args):
         output_dir=args.output_dir
     )
 
+def cmd_plot_flux(args):
+    """Plot FISPACT flux spectrum."""
+    print(f"--- Plotting FISPACT Flux Spectrum: {args.flux_file} ---")
+    from pathlib import Path
+    
+    flux_file = Path(args.flux_file)
+    output_dir = Path(args.output_dir) if args.output_dir else None
+    
+    try:
+        plot_path = plot_fispact_flux(
+            flux_file=flux_file,
+            output_dir=output_dir,
+            log_scale=args.log_scale,
+            show_plot=args.show
+        )
+        print(f"✅ Flux spectrum plot saved to: {plot_path}")
+    except Exception as e:
+        print(f"❌ Error plotting flux spectrum: {e}")
+        sys.exit(1)
+
 def cmd_full_workflow(args):
     """Run the complete workflow."""
     print("=== Full Neutronics-CALPHAD Workflow ===")
@@ -126,7 +146,7 @@ def main():
     # Plot geometry command
     plot_parser = subparsers.add_parser("plot-geometry", help="Plot tokamak geometry")
     plot_parser.add_argument("config", help=f"The geometry configuration to plot. Available: {list(CONFIGS.keys())}")
-    plot_parser.add_argument("-o", "--output-dir", default="results", 
+    plot_parser.add_argument("-o", "--output-dir", default="results/plot-geometry", 
                            help="Output directory for plots")
     plot_parser.set_defaults(func=cmd_plot_geometry)
     
@@ -176,6 +196,17 @@ def main():
     compare_parser.add_argument("--path-b-results", required=True, help="Path to Path B HDF5 results file.")
     compare_parser.add_argument("-o", "--output-dir", default="results", help="Output directory for the plot.")
     compare_parser.set_defaults(func=cmd_compare_dose)
+
+    # Plot flux command
+    flux_parser = subparsers.add_parser("plot-flux", help="Plot FISPACT flux spectrum from flux file.")
+    flux_parser.add_argument("flux_file", help="Path to FISPACT flux file (fispact_flux.txt)")
+    flux_parser.add_argument("-o", "--output-dir", default=None, 
+                           help="Output directory for the plot (default: same as flux file)")
+    flux_parser.add_argument("--linear-scale", dest="log_scale", action="store_false", 
+                           help="Use linear scale instead of log scale")
+    flux_parser.add_argument("--show", action="store_true", 
+                           help="Display plot interactively")
+    flux_parser.set_defaults(func=cmd_plot_flux)
 
     # Build manifold command
     manifold_parser = subparsers.add_parser("build-manifold", help="Build alloy manifold")

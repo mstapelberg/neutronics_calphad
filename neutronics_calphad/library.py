@@ -85,125 +85,198 @@ def get_reference_dose_rates(element, time_after_shutdown):
     closest_time = min(element_data.keys(), key=lambda t: abs(t - time_after_shutdown))
     return element_data[closest_time]
 
-def _get_flux_and_microxs(model, chain_file, outdir):
-    """Runs transport, gets flux and microscopic cross sections.
+def _convert_to_fispact_flux(flux_per_source: np.ndarray, material_volume: float, source_rate: float, outdir: Path) -> Path:
+    """Converts OpenMC flux from [n-cm/src] to FISPACT format [n/cm²/s].
+    
+    Args:
+        flux_per_source (np.ndarray): Flux spectrum in [n-cm/src] from OpenMC.
+        material_volume (float): Material volume in cm³.
+        source_rate (float): Neutron source rate in neutrons/s.
+        outdir (Path): Directory to save the FISPACT flux file.
+        
+    Returns:
+        Path: Path to the saved FISPACT flux file.
+    """
+    # Convert from [n-cm/src] to [n/cm²/s]
+    flux_fispact = flux_per_source / material_volume * source_rate
+    
+    fispact_flux_file = outdir / "fispact_flux.txt"
+    with open(fispact_flux_file, 'w') as f:
+        f.write(f"{len(flux_fispact)}\n")  # Number of energy groups
+        for phi in flux_fispact:
+            f.write(f"{phi:.6e}\n")  # Flux in [n/cm²/s] for FISPACT
+    
+    print(f"Saved FISPACT-compatible flux to {fispact_flux_file}")
+    print(f"  - Total FISPACT flux: {np.sum(flux_fispact):.6e} [n/cm²/s]")
+    
+    return fispact_flux_file
+
+def _get_flux_and_microxs(model, chain_file, outdir, power):
+    """Gets flux and microscopic cross sections using OpenMC's built-in method.
+    
     Args:
         model (openmc.Model): The OpenMC model to run.
         chain_file (str): Path to the depletion chain file.
         outdir (pathlib.Path): Directory to save output files.
+        power (float): Fusion power in Watts.
+        
     Returns:
-        tuple: Paths to the flux HDF5 file and the multi-group cross-section CSV file.
+        tuple: (flux_array, microxs_object, fispact_flux_file)
+            - flux_array: Flux spectrum in [n-cm/src]
+            - microxs_object: MicroXS object with cross sections
+            - fispact_flux_file: Path to FISPACT-compatible flux file
     """
-    flux_h5 = outdir / "flux.h5"
-    microxs_csv = outdir / "microxs.csv"
-    fispact_flux_file = outdir / "fispact_flux.txt"
-
     depletable_mats = [m for m in model.materials if m.depletable]
     if not depletable_mats:
         raise ValueError("No depletable materials found in the model.")
 
+    print(f"Getting flux and microscopic cross sections...")
+    print(f"  - Using UKAEA-1102 energy structure")
+    print(f"  - Chain file: {chain_file}")
+
+    # Get flux and microscopic cross sections using OpenMC's built-in method
     flux_list, microxs_list = openmc.deplete.get_microxs_and_flux(
         model,
         depletable_mats,
-        energies="UKAEA-1102", # CCFE-709 not available for TENDL21 in FISPACT
+        energies="UKAEA-1102",  # Keep 1102 groups for TENDL2021 compatibility
         chain_file=chain_file,
         run_kwargs={'cwd': str(outdir)}
     )
 
-    # In the context of run_element, we are interested in the 'vcrti' material
+    # Focus on the vacuum vessel material ('vcrti')
     try:
         vcrti_index = [m.name for m in depletable_mats].index('vcrti')
-        flux = flux_list[vcrti_index]
+        flux = flux_list[vcrti_index]  # Units: [n-cm/src]
         microxs = microxs_list[vcrti_index]
+        vv_material = depletable_mats[vcrti_index]
     except ValueError:
         print("Warning: 'vcrti' material not found. Using the first depletable material.")
         flux = flux_list[0]
         microxs = microxs_list[0]
+        vv_material = depletable_mats[0]
 
-    # Save flux to an HDF5 file for internal use (e.g., collapsing XS)
-    with h5py.File(flux_h5, 'w') as hf:
-        hf.create_dataset('phi', data=flux)
+    # Get material volume for flux conversion
+    material_volume = getattr(vv_material, 'volume', None)
+    if material_volume is None:
+        print("Warning: Material volume not set. Using estimated VV volume.")
+        material_volume = 2.13e5  # cm³, estimated quarter-torus VV volume
 
-    # Save microxs object to CSV
+    print(f"Material: {vv_material.name}")
+    print(f"Material volume: {material_volume:.2e} cm³")
+    print(f"Flux spectrum: {len(flux)} energy groups")
+    
+    # Calculate source rate for validation
+    source_rate = power / (E_PER_FUSION_eV * UNITS_EV_TO_J)  # neutrons/s
+    
+    # Debug: Validate flux
+    print(f"DEBUG: Flux analysis:")
+    print(f"  - Raw flux from OpenMC: {np.sum(flux):.6e} [n-cm/src]")
+    print(f"  - Neutron source rate: {source_rate:.2e} neutrons/s")
+    
+    # Validate the flux per source neutron
+    total_flux_per_neutron = np.sum(flux) / material_volume
+    if total_flux_per_neutron > 1.0:
+        print(f"WARNING: Flux density per source neutron ({total_flux_per_neutron:.6e}) > 1!")
+    elif total_flux_per_neutron > 0.1:
+        print(f"WARNING: Flux density per source neutron ({total_flux_per_neutron:.6e}) > 0.1 (high but possible)")
+    else:
+        print(f"✅ Flux density per source neutron ({total_flux_per_neutron:.6e}) is reasonable")
+    
+    # Calculate actual flux density for validation
+    actual_flux_density = np.sum(flux) / material_volume * source_rate  # [n/cm²/s]
+    print(f"  - Calculated flux density: {actual_flux_density:.2e} [n/cm²/s]")
+    
+    # Validate against typical fusion reactor flux
+    typical_flux_range = (1e14, 1e16)  # neutrons/cm²/s
+    if typical_flux_range[0] <= actual_flux_density <= typical_flux_range[1]:
+        print(f"  ✅ Flux density is in typical fusion reactor range")
+    else:
+        ratio = actual_flux_density / 1e15
+        print(f"  ⚠️  Flux density is {ratio:.1f}x off typical range")
+    
+    # Save MicroXS to CSV for comparison/debugging
+    microxs_csv = outdir / "microxs.csv"
     microxs.to_csv(microxs_csv)
-    print(f"Wrote multi-group cross sections to {microxs_csv}")
+    print(f"Saved {len(microxs.nuclides)} nuclides with cross sections to {microxs_csv}")
     
-    # Save the flux in a FISPACT-readable format
-    with open(fispact_flux_file, 'w') as f:
-        f.write(f"{len(flux)}\n")
-        for f_val in flux:
-            f.write(f"{f_val:.6e}\n")
-    print(f"Wrote FISPACT-readable flux file to {fispact_flux_file}")
+    # Create FISPACT-compatible flux file
+    fispact_flux_file = _convert_to_fispact_flux(flux, material_volume, source_rate, outdir)
     
-    return flux_h5, microxs_csv
+    return flux, microxs, fispact_flux_file
 
-def _collapse_cross_sections(flux_h5, microxs_csv, outdir):
-    """Collapses multi-group cross sections using a given flux spectrum.
-    Args:
-        flux_h5 (pathlib.Path): Path to the HDF5 file with CCFE-709 flux.
-        microxs_csv (pathlib.Path): Path to the OpenMC micro-xs CSV file.
-        outdir (pathlib.Path): Directory to save the output CSV.
-    Returns:
-        pathlib.Path: Path to the output CSV file.
-    """
-    out_csv = outdir / "collapsed_xs.csv"
+def _run_independent_depletion(model, microxs, flux, chain_file, timesteps, power, outdir):
+    """Runs depletion with IndependentOperator using microscopic cross sections.
     
-    with h5py.File(flux_h5, 'r') as hf:
-        # Assuming single material, flux has shape (1, n_groups)
-        phi_E = hf['phi'][:][0]
-
-    microxs = openmc.deplete.MicroXS.from_csv(microxs_csv)
-    
-    collapsed_data = []
-    sum_phi_E = np.sum(phi_E)
-    if sum_phi_E == 0:
-        raise ValueError("Total flux is zero, cannot normalize.")
-
-    for i, nuc in enumerate(microxs.nuclides):
-        for j, rx in enumerate(microxs.reactions[nuc]):
-            sigma_E = microxs[nuc, rx]
-            sigma_eff = np.sum(sigma_E * phi_E) / sum_phi_E
-            if sigma_eff > 0:
-                collapsed_data.append({
-                    'ZAID': nuc.zaid,
-                    'MT': rx.mt,
-                    'sigma_b': sigma_eff
-                })
-
-    pd.DataFrame(collapsed_data).to_csv(out_csv, index=False)
-    return out_csv
-
-def _run_independent_depletion(model, xs_csv, flux_h5, chain_file, timesteps, power, outdir):
-    """Runs depletion with IndependentOperator.
     Args:
         model (openmc.Model): The OpenMC model with initial compositions.
-        xs_csv (pathlib.Path): Path to the collapsed cross-sections CSV file.
-        flux_h5 (pathlib.Path): Path to the HDF5 flux file.
+        microxs (openmc.deplete.MicroXS): The microscopic cross-sections object.
+        flux (np.ndarray): The flux spectrum array [n-cm/src].
         chain_file (str): Path to the depletion chain file.
         timesteps (list): List of irradiation/cooling durations in seconds.
         power (float): Fusion power in Watts.
         outdir (pathlib.Path): Directory to save depletion results.
+        
     Returns:
         openmc.deplete.Results: The depletion results object.
     """
-    with h5py.File(flux_h5, 'r') as hf:
-        initial_flux = hf['phi'][:][0]
-
-    micro_xs = openmc.deplete.MicroXS.from_csv(str(xs_csv))
+    # Calculate source rate from fusion power
+    source_rate = power / (E_PER_FUSION_eV * UNITS_EV_TO_J)  # neutrons/s
     
+    print(f"Depletion calculation setup:")
+    print(f"  - Fusion power: {power/1e6:.1f} MW")
+    print(f"  - Neutron source rate: {source_rate:.2e} neutrons/s")
+    print(f"  - Flux format: [n-cm/src] (volume-integrated per source neutron)")
+    print(f"  - Total flux per source neutron: {np.sum(flux):.6e} [n-cm/src]")
+    
+    # Get the vacuum vessel material for depletion
+    vv_material = None
+    for mat in model.materials:
+        if mat.name == 'vcrti' and mat.depletable:
+            vv_material = mat
+            break
+    
+    if vv_material is None:
+        # Fallback to first depletable material
+        depletable_mats = [m for m in model.materials if m.depletable]
+        if not depletable_mats:
+            raise ValueError("No depletable materials found")
+        vv_material = depletable_mats[0]
+        print(f"Warning: vcrti material not found, using {vv_material.name}")
+    
+    print(f"Using material for depletion: {vv_material.name}")
+    
+    # Create IndependentOperator - NO chain reduction here since it was done earlier
     op = openmc.deplete.IndependentOperator(
-        materials=model.materials,
-        micro_xs=micro_xs,
+        materials=[vv_material],      # Only the material we calculated flux/XS for
+        fluxes=[flux],               # Flux in [n-cm/src] 
+        micros=[microxs],            # MicroXS object from get_microxs_and_flux
         chain_file=str(chain_file),
-        initial_flux=initial_flux,
-        normalization_mode='source-rate'
+        normalization_mode='source-rate',
+        reduce_chain=False,          # Don't reduce again - already done earlier
+        reduce_chain_level=None      # Not used when reduce_chain=False
     )
     
-    source_rate = power / (E_PER_FUSION_eV * UNITS_EV_TO_J)
-    source_rates = [source_rate] + [0.0] * (len(timesteps) - 1)
-
-    integrator = openmc.deplete.CECMIntegrator(op, timesteps, source_rates=source_rates)
-    integrator.integrate(cwd=str(outdir))
+    # Set up time steps and source rates (irradiation followed by cooling)
+    source_rates = [source_rate] + [0.0] * (len(timesteps) - 1)  # Irradiation then cooling
+    
+    # Use CECM integrator with tighter tolerance for numerical stability
+    integrator = openmc.deplete.CECMIntegrator(
+        op, 
+        timesteps, 
+        source_rates=source_rates,
+        timestep_units='s'
+    )
+    
+    # Set solver options to handle negative densities
+    integrator.solver_kwargs = {
+        'rtol': 1e-4,        # Relative tolerance
+        'atol': 1e-12,       # Absolute tolerance for small concentrations
+        'max_step': 1e6,     # Maximum step size in seconds
+        'method': 'BDF'      # Backward differentiation formula for stiff problems
+    }
+    
+    print("Running depletion with flux [n-cm/src] and pre-calculated MicroXS...")
+    integrator.integrate(path=str(outdir / "depletion_results.h5"))
     
     return openmc.deplete.Results(outdir / "depletion_results.h5")
 
@@ -231,7 +304,7 @@ def _calculate_fispact_dose(results, data_dir):
     dose_rates = []
     # Skip initial and irradiation steps (indices 0 and 1)
     for i in range(2, len(results)):
-        mat = results[i].get_material(str(results[i].mat_to_ind.keys()[0]))
+        mat = results[i].get_material(str(list(results[i].index_mat.keys())[0]))
         activities = mat.get_activity(by_nuclide=True, units='Bq')
         gamma_spec = mat.get_decay_photon_energy()
 
@@ -248,6 +321,21 @@ def _calculate_fispact_dose(results, data_dir):
         # Here we get µSv/h
         dose_sv_h = 1.602e-13 * 3600 * np.sum(gamma_spec.p * energies_mev * mu_en_rho)
         dose_usv_h = dose_sv_h * 1e6
+        
+        # Debug: Add activity and photon rate information
+        total_activity = mat.get_activity()  # Bq
+        if hasattr(gamma_spec, 'integral'):
+            photon_rate = gamma_spec.integral()  # photons/s
+        else:
+            photon_rate = np.sum(gamma_spec.p)
+        
+        if i == 2:  # Only print for first cooling step to avoid spam
+            print(f"DEBUG FISPACT dose calculation:")
+            print(f"  - Total activity: {total_activity:.2e} Bq")
+            print(f"  - Photon rate: {photon_rate:.2e} photons/s")
+            print(f"  - Average photon energy: {np.mean(energies_mev):.3f} MeV")
+            print(f"  - Dose rate: {dose_usv_h:.2e} µSv/h = {dose_sv_h:.2e} Sv/h")
+        
         dose_rates.append(dose_usv_h)
         
     return np.array(dose_rates)
@@ -258,7 +346,7 @@ def _get_fispact_xs(printlib_path, outdir):
 
     This function reads a FISPACT-II `printlib` file, finds the block
     containing one-group cross-sections, parses the data, and saves it
-    to a CSV file compatible with `openmc.deplete.MicroXS.from_csv`.
+    to a CSV file in the same format as the collapsed OpenMC cross sections.
 
     Args:
         printlib_path (str or Path): Path to the FISPACT printlib file.
@@ -311,7 +399,12 @@ def _get_fispact_xs(printlib_path, outdir):
                 if 'm' in nuclide_str:
                     nuclide_str = re.sub(r'm(\d*)', r'_m\1', nuclide_str)
 
-                zaid = openmc.Nuclide(nuclide_str).zaid
+                # Validate nuclide name
+                try:
+                    zaid = openmc.Nuclide(nuclide_str).zaid
+                except:
+                    # Skip if nuclide not recognized
+                    continue
                 
                 # The cross section is usually the first floating point number
                 # after the reaction string like '(n,gamma)'
@@ -328,9 +421,9 @@ def _get_fispact_xs(printlib_path, outdir):
 
                 if xs_val > 0.0:
                     collapsed_data.append({
-                        'ZAID': zaid,
-                        'MT': mt,
-                        'sigma_b': xs_val
+                        'nuclide': nuclide_str,
+                        'reaction': mt,
+                        'xs_barns': xs_val
                     })
             except (ValueError, IndexError, openmc.exceptions.DataError) as e:
                 if "No data available" not in str(e): # Suppress common benign errors
@@ -344,18 +437,19 @@ def _get_fispact_xs(printlib_path, outdir):
             "the 'CROSS-SECTIONS FOR ALL REACTIONS' block."
         )
 
-    out_csv = outdir / "fispact_collapsed_xs.csv"
+    # Save to CSV in same format as collapsed OpenMC cross sections
+    collapsed_csv = outdir / "fispact_collapsed_xs.csv"
     df = pd.DataFrame(collapsed_data)
     
-    # Remove duplicates that might arise from parsing, keeping the first
-    df = df.drop_duplicates(subset=['ZAID', 'MT'], keep='first')
+    # Remove duplicates (same nuclide-reaction pair) keeping first occurrence
+    df = df.drop_duplicates(subset=['nuclide', 'reaction'], keep='first')
     
-    df.to_csv(out_csv, index=False)
+    df.to_csv(collapsed_csv, index=False)
     
     print(f" Successfully parsed {len(df)} unique cross sections from printlib.")
-    print(f"Saved FISPACT collapsed cross sections to {out_csv}")
+    print(f"Saved FISPACT collapsed cross sections to {collapsed_csv}")
     
-    return out_csv
+    return collapsed_csv
 
 
 def run_element(element,
@@ -468,7 +562,7 @@ def run_element(element,
         if not reduced_chain_path.exists():
             print("Generating reduced depletion chain...")
             try:
-                reduced_chain = full_chain.reduce(nuclides_for_reduction)
+                reduced_chain = full_chain.reduce(nuclides_for_reduction, level=5)
                 reduced_chain.export_to_xml(reduced_chain_path)
                 print(f" Wrote reduced chain to {reduced_chain_path} ({len(reduced_chain.nuclides)} nuclides)")
             except KeyError as e:
@@ -503,10 +597,22 @@ def run_element(element,
             model,
             chain_file=chain_file_to_use,
             normalization_mode='source-rate',
+            reduce_chain=False,              # Don't reduce again - already done earlier
+            reduce_chain_level=None          # Not used when reduce_chain=False
         )
         
+        # Use PredictorIntegrator with enhanced settings for numerical stability
         integrator = openmc.deplete.PredictorIntegrator(
-            operator, TIMES, source_rates=source_rates)
+            operator, TIMES, source_rates=source_rates, timestep_units='s'
+        )
+        
+        # Set solver options to handle negative densities
+        integrator.solver_kwargs = {
+            'rtol': 1e-4,        # Relative tolerance (slightly relaxed)
+            'atol': 1e-12,       # Absolute tolerance for small concentrations
+            'max_step': 1e6,     # Maximum step size in seconds
+            'method': 'BDF'      # Backward differentiation formula for stiff problems
+        }
         
         original_cwd = os.getcwd()
         os.chdir(depletion_dir)
@@ -523,27 +629,61 @@ def run_element(element,
         depletion_dir = element_outdir / "depletion_independent"
         depletion_dir.mkdir(parents=True, exist_ok=True)
         
-        flux_h5, microxs_csv = _get_flux_and_microxs(model, chain_file_to_use, depletion_dir)
+        print(f"DEBUG: Starting {workflow} workflow")
+        print(f"  - Chain file to use: {chain_file_to_use}")
+        print(f"  - Depletion directory: {depletion_dir}")
+        
+        flux, microxs, fispact_flux_file = _get_flux_and_microxs(model, chain_file_to_use, depletion_dir, power)
+        
+        print(f"DEBUG: Transport completed")
+        print(f"  - Flux array: {len(flux)} energy groups")
+        print(f"  - MicroXS object: {len(microxs.nuclides)} nuclides, {len(microxs.reactions)} reactions")
+        print(f"  - FISPACT flux file: {fispact_flux_file}")
 
         if workflow == 'fispact_path_a':
-            xs_csv = _collapse_cross_sections(flux_h5, microxs_csv, depletion_dir)
+            # Use the MicroXS object directly from get_microxs_and_flux
+            # No collapse needed - already flux-weighted and ready to use
+            print(f"DEBUG: Using MicroXS object directly (no collapse needed)")
+            final_microxs = microxs
         else:  # fispact_path_b
             if not printlib_file:
                 raise ValueError("The 'fispact_path_b' workflow requires a `printlib_file`.")
             print(f"Using FISPACT cross sections from: {printlib_file}")
             xs_csv = _get_fispact_xs(printlib_file, depletion_dir)
+            
+            # For fispact_path_b, cross sections are already collapsed from FISPACT
+            # Read them and create a proper MicroXS object
+            df = pd.read_csv(xs_csv)
+            nuclides = sorted(df['nuclide'].unique())
+            reactions = sorted(df['reaction'].unique())
+            
+            # Create the data array: [nuclide, reaction, energy_group]
+            n_nuclides = len(nuclides)
+            n_reactions = len(reactions)
+            n_groups = 1  # FISPACT data is already collapsed to 1 group
+            
+            data = np.zeros((n_nuclides, n_reactions, n_groups))
+            
+            # Populate the data array
+            for _, row in df.iterrows():
+                nuc_idx = nuclides.index(row['nuclide'])
+                rx_idx = reactions.index(row['reaction'])
+                data[nuc_idx, rx_idx, 0] = row['xs_barns']
+            
+            final_microxs = openmc.deplete.MicroXS(data, nuclides, reactions)
+            print(f"Created MicroXS from FISPACT data: {len(nuclides)} nuclides, {len(reactions)} reactions")
 
         results = _run_independent_depletion(
-            model, xs_csv, flux_h5, chain_file_to_use, TIMES, power, depletion_dir
+            model, final_microxs, flux, chain_file_to_use, TIMES, power, depletion_dir
         )
         
-        if workflow == 'fispact_path_a':
-            # Assumes 'data' dir is sibling to 'neutronics_calphad'
-            data_dir = Path(__file__).parent.parent / 'data'
-            dose_rates = _calculate_fispact_dose(results, data_dir)
-        else: # fispact_path_b
-            # TODO: Refactor photon transport logic here
-            dose_rates = [0.0] * len(TIMES) # Placeholder
+        # Both FISPACT workflows use the same dose calculation method
+        data_dir = Path(__file__).parent / 'data'
+        fispact_dose_rates = _calculate_fispact_dose(results, data_dir)
+        # Convert to list for consistency with R2S workflow
+        dose_rates = fispact_dose_rates.tolist()
+        print(f"Calculated dose rates using FISPACT formula for {workflow} workflow")
+        print(f"DEBUG: Array sizes - TIMES: {len(TIMES)}, dose_rates: {len(dose_rates)}, results: {len(results)}")
     else:
         raise ValueError(f"Unknown workflow: {workflow}")
 
@@ -643,266 +783,323 @@ def run_element(element,
                 pass
             gases[gas] = 0.0
 
-    # --- Photon transport for dose rate ---
-    # Set the chain file for decay photon energy calculations - use absolute path
-    openmc.config['chain_file'] = os.path.abspath(chain_file_to_use)
-    
-    print(f"\nStarting photon transport analysis...")
-    print(f"   - Chain file set to: {openmc.config['chain_file']}")
-    print(f"   - Results file: {results_file}")
-    print(f"   - Number of results: {len(results)}")
-    
-    dose_rates = []
-    
-    # Create a mesh for the dose tally - explicitly define bounds
-    mesh = openmc.RegularMesh()
-    mesh.dimension = [100, 100, 100]  # x, y, z
-    # Define mesh bounds to cover the tokamak geometry
-    mesh.lower_left = [0, 0, -350]     # Quarter torus starts at x=0, y=0
-    mesh.upper_right = [600, 600, 350] # Extends to outer boundaries
-    
-    energies, pSv_cm2 = openmc.data.dose_coefficients(particle="photon", geometry="AP")
-    dose_filter = openmc.EnergyFunctionFilter(energies, pSv_cm2)
-    particle_filter = openmc.ParticleFilter(["photon"])
-    mesh_filter = openmc.MeshFilter(mesh)
-    dose_tally = openmc.Tally(name="photon_dose_on_mesh")
-    dose_tally.filters = [mesh_filter, dose_filter, particle_filter]
-    dose_tally.scores = ["flux"]
-    
-    model.tallies = openmc.Tallies([dose_tally])
-    
-    # Get the vacuum vessel cell for source definition
-    vv_cell = model.vv_cell
-    
-    print(f"\nDEBUG: Starting photon transport calculations...")
-    print(f"  Processing {len(TIMES)} cooling time steps")
-    
-    for i in range(1, len(TIMES)): # Skip the irradiation step (index 0)
-        cooling_time = TIMES[i-1]  # TIMES[0] corresponds to results[2], etc.
-        result_index = i + 1  # Correct index: results[0]=initial, results[1]=after irradiation, results[2]=first cooling, etc.
-        time_label = f"{cooling_time} s"
+    # --- Photon transport for dose rate (only for R2S workflow) ---
+    if workflow == 'r2s':
+        # Set the chain file for decay photon energy calculations - use absolute path
+        openmc.config['chain_file'] = os.path.abspath(chain_file_to_use)
         
-        # Convert to readable format
-        if cooling_time == 10*365*24*3600:
-            time_label = "10 years"
-        elif cooling_time == 5*365*24*3600:
-            time_label = "5 years"
-        elif cooling_time == 25*365*24*3600:
-            time_label = "25 years"
-        elif cooling_time == 100*365*24*3600:
-            time_label = "100 years"
+        print(f"\nStarting photon transport analysis for {workflow} workflow...")
+        print(f"   - Chain file set to: {openmc.config['chain_file']}")
+        print(f"   - Results file: {results_file}")
+        print(f"   - Number of results: {len(results)}")
+        
+        dose_rates = []
+        
+        # Create a mesh for the dose tally - explicitly define bounds
+        mesh = openmc.RegularMesh()
+        mesh.dimension = [100, 100, 100]  # x, y, z
+        # Define mesh bounds to cover the tokamak geometry
+        mesh.lower_left = [0, 0, -350]     # Quarter torus starts at x=0, y=0
+        mesh.upper_right = [600, 600, 350] # Extends to outer boundaries
+        
+        energies, pSv_cm2 = openmc.data.dose_coefficients(particle="photon", geometry="AP")
+        dose_filter = openmc.EnergyFunctionFilter(energies, pSv_cm2)
+        particle_filter = openmc.ParticleFilter(["photon"])
+        mesh_filter = openmc.MeshFilter(mesh)
+        dose_tally = openmc.Tally(name="photon_dose_on_mesh")
+        dose_tally.filters = [mesh_filter, dose_filter, particle_filter]
+        dose_tally.scores = ["flux"]
+        
+        model.tallies = openmc.Tallies([dose_tally])
+        
+        # Get the vacuum vessel cell for source definition
+        vv_cell = model.vv_cell
+        
+        print(f"\nDEBUG: Starting photon transport calculations...")
+        print(f"  Processing {len(TIMES)} cooling time steps")
+    
+        for i in range(1, len(TIMES)): # Skip the irradiation step (index 0)
+            cooling_time = TIMES[i-1]  # TIMES[0] corresponds to results[2], etc.
+            result_index = i + 1  # Correct index: results[0]=initial, results[1]=after irradiation, results[2]=first cooling, etc.
+            time_label = f"{cooling_time} s"
             
-        print(f"\n{'='*60}")
-        print(f"Calculating dose rate at cooling time {cooling_time} s ({time_label})")
-        print(f"Using result index: {result_index} (corrected from {i})")
-        print(f"{'='*60}")
-        
-        activated_mat = results[result_index].get_material(str(vv_material.id))
-        
-        # Enhanced debugging for material state
-        print(f"\nDEBUG: Material state at {time_label}:")
-        try:
-            activity = activated_mat.get_activity()
-            decay_heat = activated_mat.get_decay_heat()
-            nuclides = list(activated_mat.get_nuclides())[:5]  # First 5 nuclides
-            print(f"  - Total activity: {activity:.2e} Bq")
-            print(f"  - Decay heat: {decay_heat:.2e} W")
-            print(f"  - Sample nuclides: {nuclides}")
-        except Exception as e:
-            print(f"  - Error getting material properties: {e}")
-        
-        # DEBUG: Check the activated material properties
-        # Use the original material's volume since it's not preserved in depletion results
-        original_volume = vv_material.volume if hasattr(vv_material, 'volume') else None
-        original_density = vv_material.density if hasattr(vv_material, 'density') else None
-        activated_density = getattr(activated_mat, 'density', None)
-        
-        if original_volume is not None and activated_density is not None:
-            material_mass = activated_density * original_volume if original_volume > 0 else 0
-            print(f"DEBUG: Activated material volume (from original): {original_volume:.2e} cm³")
-            print(f"DEBUG: Material density: {activated_density:.2f} g/cm³")
-            print(f"DEBUG: Activated material mass: {material_mass:.2e} g")
-        elif original_volume is not None and original_density is not None:
-            # Use original density if activated density is None
-            material_mass = original_density * original_volume if original_volume > 0 else 0
-            print(f"DEBUG: Activated material volume (from original): {original_volume:.2e} cm³")
-            print(f"DEBUG: Material density (from original): {original_density:.2f} g/cm³")
-            print(f"DEBUG: Activated material mass (estimated): {material_mass:.2e} g")
-        else:
-            print(f"DEBUG: Material volume/density not available")
-            print(f"DEBUG: Available attributes: {[attr for attr in dir(activated_mat) if not attr.startswith('_')]}")
-            # Fallback to reasonable estimates if both are not available
-            if original_volume is None:
-                print(f"WARNING: Using estimated VV volume")
-                original_volume = 2.13e+05  # cm³ for quarter torus VV
-            if original_density is None:
-                print(f"WARNING: Using estimated VV density")
-                original_density = 6.11  # g/cm³ for Vanadium
-            material_mass = original_density * original_volume
-            print(f"DEBUG: Using fallback estimates: V={original_volume:.2e} cm³, ρ={original_density:.2f} g/cm³")
-        
-        # DEBUG: Check decay photon source properties
-        decay_photon_energy = None
-        total_photon_rate = 0
-        
-        try:
-            print(f"\nDEBUG: Getting decay photon energy for {time_label}...")
-            decay_photon_energy = activated_mat.get_decay_photon_energy()
-            
-            if decay_photon_energy is None:
-                print(f"  - get_decay_photon_energy() returned None")
-            else:
-                print(f"  - Decay photon energy object created")
+            # Convert to readable format
+            if cooling_time == 10*365*24*3600:
+                time_label = "10 years"
+            elif cooling_time == 5*365*24*3600:
+                time_label = "5 years"
+            elif cooling_time == 25*365*24*3600:
+                time_label = "25 years"
+            elif cooling_time == 100*365*24*3600:
+                time_label = "100 years"
                 
-                # Check if it's a valid distribution
-                if hasattr(decay_photon_energy, 'integral'):
-                    total_photon_rate = decay_photon_energy.integral()  # Total photons/s
-                    print(f"  - Total photon rate: {total_photon_rate:.2e} photons/s")
-                    
-                    if total_photon_rate == 0:
-                        print(f"  - WARNING: Photon rate is exactly zero!")
-                        # Try to understand why
-                        if hasattr(decay_photon_energy, 'x') and hasattr(decay_photon_energy, 'p'):
-                            print(f"    - Energy bins: {len(decay_photon_energy.x)}")
-                            print(f"    - Probability sum: {np.sum(decay_photon_energy.p):.2e}")
-                else:
-                    print(f"  - Decay photon energy has no 'integral' method")
-                    print(f"  - Available methods: {[m for m in dir(decay_photon_energy) if not m.startswith('_')]}")
+            print(f"\n{'='*60}")
+            print(f"Calculating dose rate at cooling time {cooling_time} s ({time_label})")
+            print(f"Using result index: {result_index} (corrected from {i})")
+            print(f"{'='*60}")
             
-            # Get energy spectrum info
-            if decay_photon_energy and hasattr(decay_photon_energy, 'x') and hasattr(decay_photon_energy, 'p'):
-                energies = decay_photon_energy.x
-                probabilities = decay_photon_energy.p
-                if len(energies) > 0 and np.sum(probabilities) > 0:
-                    avg_energy = np.sum(energies * probabilities) / np.sum(probabilities)
-                    print(f"DEBUG: Average photon energy: {avg_energy:.3f} eV")
-                    print(f"DEBUG: Energy range: {min(energies):.2e} - {max(energies):.2e} eV")
-                else:
-                    print(f"DEBUG: No valid energy spectrum data")
+            activated_mat = results[result_index].get_material(str(vv_material.id))
             
-        except Exception as e:
-            print(f"DEBUG: Exception getting photon energy distribution: {e}")
-            import traceback
-            traceback.print_exc()
-            decay_photon_energy = None
-        
-        if decay_photon_energy is None or total_photon_rate == 0:
-            print(f"\nWARNING: No decay photons at time {cooling_time} s ({time_label})")
-            print(f"    - Appending 0.0 to dose_rates")
-            dose_rates.append(0.0)
-            continue
-        
-        photon_source = openmc.Source()
-        photon_source.space = openmc.stats.Box(*vv_cell.bounding_box)
-        photon_source.particle = 'photon'
-        photon_source.energy = decay_photon_energy
-        
-        # DEBUG: Check source box dimensions
-        bbox = vv_cell.bounding_box
-        print(f"DEBUG: Source box: x=[{bbox[0][0]:.1f}, {bbox[1][0]:.1f}], "
-              f"y=[{bbox[0][1]:.1f}, {bbox[1][1]:.1f}], z=[{bbox[0][2]:.1f}, {bbox[1][2]:.1f}] cm")
-        
-        model.settings.source = photon_source
-        model.settings.particles = 10000
-        
-        photon_outdir = element_outdir / f"photon_transport_{cooling_time}s"
-        photon_outdir.mkdir(parents=True, exist_ok=True)
-        
-        # Run photon transport with MPI if specified
-        if mpi_args:
-            print(f"DEBUG: Using MPI for photon transport: {mpi_args}")
-            # Ensure OpenMC is re-initialized for MPI in a clean state
-            openmc.lib.reset()
-            statepoint_file = model.run(cwd=photon_outdir, mpi_args=mpi_args)
-        else:
-            openmc.lib.reset()
-            statepoint_file = model.run(cwd=photon_outdir)
-        
-        with openmc.StatePoint(statepoint_file) as sp:
-            tally = sp.get_tally(name="photon_dose_on_mesh")
-            
-            # DEBUG: Check tally statistics
-            raw_mean = tally.mean.flatten()
-            raw_std = tally.std_dev.flatten()
-            non_zero_cells = np.sum(raw_mean > 0)
-            print(f"DEBUG: Tally statistics:")
-            print(f"  - Non-zero mesh cells: {non_zero_cells}/{len(raw_mean)}")
-            print(f"  - Raw tally range: {np.min(raw_mean):.2e} - {np.max(raw_mean):.2e}")
-            print(f"  - Raw tally mean: {np.mean(raw_mean):.2e}")
-            print(f"  - Relative error: {np.mean(raw_std[raw_mean > 0])/np.mean(raw_mean[raw_mean > 0])*100:.1f}%" if non_zero_cells > 0 else "  - Relative error: N/A")
-            
-            # Convert from pSv-cm^3/source-particle to uSv/h
-            # The tally gives dose per source particle, but we need total dose rate
-            volume = mesh.volumes[0][0][0]
-            print(f"DEBUG: Mesh cell volume: {volume:.2e} cm³")
-            
-            # Scaling breakdown:
-            # 1. tally.mean is in pSv⋅cm³/source-particle 
-            # 2. multiply by total_photon_rate (photons/s) to get pSv⋅cm³/s
-            # 3. divide by volume to get pSv/s  
-            # 4. multiply by 3600 to get pSv/h
-            # 5. multiply by 1e-6 to get µSv/h
-            
-            scaling_factor = total_photon_rate * 1e-6 * 3600 / volume
-            print(f"DEBUG: Scaling factor breakdown:")
-            print(f"  - Total photon rate: {total_photon_rate:.2e} photons/s")
-            print(f"  - Volume normalization: 1/{volume:.2e} = {1/volume:.2e} /cm³")
-            print(f"  - Unit conversion: 1e-6 * 3600 = {1e-6 * 3600:.2e} (pSv→µSv, s→h)")
-            print(f"  - Final scaling factor: {scaling_factor:.2e}")
-            
-            dose_mean = raw_mean * scaling_factor
-            average_dose = np.mean(dose_mean)
-            max_dose = np.max(dose_mean)
-            
-            print(f"DEBUG: Final dose values:")
-            print(f"  - Average dose rate: {average_dose:.2e} µSv/h")
-            print(f"  - Maximum dose rate: {max_dose:.2e} µSv/h")
-            
-            # Compare with reference values
-            ref_low, ref_high = get_reference_dose_rates(element, cooling_time)
-            print(f"DEBUG: Reference comparison:")
-            print(f"  - Expected range: {ref_low:.2e} - {ref_high:.2e} µSv/h")
-            if average_dose < ref_low:
-                ratio = ref_low / average_dose if average_dose > 0 else float('inf')
-                print(f"  - RESULT TOO LOW by factor of {ratio:.1e}")
-            elif average_dose > ref_high:
-                ratio = average_dose / ref_high
-                print(f"  - RESULT TOO HIGH by factor of {ratio:.1e}")
-            else:
-                print(f"  - Result within expected range")
-            
-            dose_rates.append(average_dose)
-            
-            # Finalize the OpenMC process to release file handles
-            openmc.lib.finalize()
-            
-            # Plot the dose map - add validation for LogNorm
+            # Enhanced debugging for material state
+            print(f"\nDEBUG: Material state at {time_label}:")
             try:
-                # Check if tally data is valid for LogNorm (no zeros, negative values, or NaN)
-                tally_data = tally.mean.flatten() * scaling_factor
-                valid_data = tally_data[~np.isnan(tally_data) & (tally_data > 0)]
-                
-                if len(valid_data) > 0 and np.max(valid_data) > np.min(valid_data):
-                    # Data is valid for LogNorm
-                    plot_norm = LogNorm(vmin=max(np.min(valid_data), 1e-10), vmax=np.max(valid_data))
-                else:
-                    # Fall back to linear normalization
-                    plot_norm = None
-                    print(f"Warning: Using linear scale for dose plot due to invalid data for log scale")
-                
-                plot = plot_mesh_tally(
-                    tally=tally,
-                    basis="xz",
-                    value="mean",
-                    colorbar_kwargs={'label': "Decay photon dose [µSv/h]"},
-                    norm=plot_norm,
-                    volume_normalization=False,
-                    scaling_factor=scaling_factor,
-                )
-                plot.figure.savefig(photon_outdir / f'dose_map_{element}_{workflow}_time_{cooling_time}s.png')
+                activity = activated_mat.get_activity()
+                decay_heat = activated_mat.get_decay_heat()
+                nuclides = list(activated_mat.get_nuclides())[:5]  # First 5 nuclides
+                print(f"  - Total activity: {activity:.2e} Bq")
+                print(f"  - Decay heat: {decay_heat:.2e} W")
+                print(f"  - Sample nuclides: {nuclides}")
             except Exception as e:
-                print(f"Warning: Could not create dose plot for {element} at time {cooling_time}s: {e}")
-                # Continue without plotting
+                print(f"  - Error getting material properties: {e}")
+            
+            # DEBUG: Check the activated material properties
+            # Use the original material's volume since it's not preserved in depletion results
+            original_volume = vv_material.volume if hasattr(vv_material, 'volume') else None
+            original_density = vv_material.density if hasattr(vv_material, 'density') else None
+            activated_density = getattr(activated_mat, 'density', None)
+            
+            if original_volume is not None and activated_density is not None:
+                material_mass = activated_density * original_volume if original_volume > 0 else 0
+                print(f"DEBUG: Activated material volume (from original): {original_volume:.2e} cm³")
+                print(f"DEBUG: Material density: {activated_density:.2f} g/cm³")
+                print(f"DEBUG: Activated material mass: {material_mass:.2e} g")
+            elif original_volume is not None and original_density is not None:
+                # Use original density if activated density is None
+                material_mass = original_density * original_volume if original_volume > 0 else 0
+                print(f"DEBUG: Activated material volume (from original): {original_volume:.2e} cm³")
+                print(f"DEBUG: Material density (from original): {original_density:.2f} g/cm³")
+                print(f"DEBUG: Activated material mass (estimated): {material_mass:.2e} g")
+            else:
+                print(f"DEBUG: Material volume/density not available")
+                print(f"DEBUG: Available attributes: {[attr for attr in dir(activated_mat) if not attr.startswith('_')]}")
+                # Fallback to reasonable estimates if both are not available
+                if original_volume is None:
+                    print(f"WARNING: Using estimated VV volume")
+                    original_volume = 2.13e+05  # cm³ for quarter torus VV
+                if original_density is None:
+                    print(f"WARNING: Using estimated VV density")
+                    original_density = 6.11  # g/cm³ for Vanadium
+                material_mass = original_density * original_volume
+                print(f"DEBUG: Using fallback estimates: V={original_volume:.2e} cm³, ρ={original_density:.2f} g/cm³")
+            
+            # DEBUG: Check decay photon source properties
+            decay_photon_energy = None
+            total_photon_rate = 0
+            
+            try:
+                print(f"\nDEBUG: Getting decay photon energy for {time_label}...")
+                decay_photon_energy = activated_mat.get_decay_photon_energy()
+                
+                if decay_photon_energy is None:
+                    print(f"  - get_decay_photon_energy() returned None")
+                else:
+                    print(f"  - Decay photon energy object created")
+                    
+                    # Check if it's a valid distribution
+                    if hasattr(decay_photon_energy, 'integral'):
+                        total_photon_rate = decay_photon_energy.integral()  # Total photons/s
+                        print(f"  - Total photon rate: {total_photon_rate:.2e} photons/s")
+                        
+                        if total_photon_rate == 0:
+                            print(f"  - WARNING: Photon rate is exactly zero!")
+                            # Try to understand why
+                            if hasattr(decay_photon_energy, 'x') and hasattr(decay_photon_energy, 'p'):
+                                print(f"    - Energy bins: {len(decay_photon_energy.x)}")
+                                print(f"    - Probability sum: {np.sum(decay_photon_energy.p):.2e}")
+                    else:
+                        print(f"  - Decay photon energy has no 'integral' method")
+                        print(f"  - Available methods: {[m for m in dir(decay_photon_energy) if not m.startswith('_')]}")
+                
+                # Get energy spectrum info
+                if decay_photon_energy and hasattr(decay_photon_energy, 'x') and hasattr(decay_photon_energy, 'p'):
+                    energies = decay_photon_energy.x
+                    probabilities = decay_photon_energy.p
+                    if len(energies) > 0 and np.sum(probabilities) > 0:
+                        avg_energy = np.sum(energies * probabilities) / np.sum(probabilities)
+                        print(f"DEBUG: Average photon energy: {avg_energy:.3f} eV")
+                        print(f"DEBUG: Energy range: {min(energies):.2e} - {max(energies):.2e} eV")
+                    else:
+                        print(f"DEBUG: No valid energy spectrum data")
+                
+            except Exception as e:
+                print(f"DEBUG: Exception getting photon energy distribution: {e}")
+                import traceback
+                traceback.print_exc()
+                decay_photon_energy = None
+            
+            if decay_photon_energy is None or total_photon_rate == 0:
+                print(f"\nWARNING: No decay photons at time {cooling_time} s ({time_label})")
+                print(f"    - Appending 0.0 to dose_rates")
+                dose_rates.append(0.0)
+                continue
+                 
+            photon_source = openmc.Source()
+            photon_source.space = openmc.stats.Box(*vv_cell.bounding_box)
+            photon_source.particle = 'photon'
+            photon_source.energy = decay_photon_energy
+            
+            # DEBUG: Check source box dimensions
+            bbox = vv_cell.bounding_box
+            print(f"DEBUG: Source box: x=[{bbox[0][0]:.1f}, {bbox[1][0]:.1f}], "
+                  f"y=[{bbox[0][1]:.1f}, {bbox[1][1]:.1f}], z=[{bbox[0][2]:.1f}, {bbox[1][2]:.1f}] cm")
+            
+            model.settings.source = photon_source
+            model.settings.particles = 10000
+            model.settings.batches = 10
+            model.settings.photon_transport = True  # Ensure photon transport is enabled
+            model.settings.run_mode = 'fixed source'
+            
+            # Add basic output settings
+            photon_outdir = element_outdir / f"photon_transport_{cooling_time}s"
+            photon_outdir.mkdir(parents=True, exist_ok=True)
+            
+            print(f"DEBUG: Photon transport setup:")
+            print(f"  - Particles: {model.settings.particles}")
+            print(f"  - Batches: {model.settings.batches}")
+            print(f"  - Total photon rate: {total_photon_rate:.2e} photons/s")
+            print(f"  - Output directory: {photon_outdir}")
+            print(f"  - Source particle: {photon_source.particle}")
+            print(f"  - Source type: {type(photon_source.energy)}")
+            
+            # Run photon transport with MPI if specified
+            try:
+                if mpi_args:
+                    print(f"DEBUG: Using MPI for photon transport: {mpi_args}")
+                    # Ensure OpenMC is re-initialized for MPI in a clean state
+                    openmc.lib.reset()
+                    statepoint_file = model.run(cwd=photon_outdir, mpi_args=mpi_args)
+                else:
+                    openmc.lib.reset()
+                    statepoint_file = model.run(cwd=photon_outdir)
+                
+                print(f"DEBUG: Photon transport returned statepoint: {statepoint_file}")
+                
+                if statepoint_file is None:
+                    print(f"WARNING: Photon transport failed for {time_label}.")
+                    print(f"  Falling back to FISPACT dose calculation...")
+                    try:
+                        # Fallback to FISPACT dose calculation
+                        data_dir = Path(__file__).parent / 'data'
+                        if (data_dir / "mass_energy_abs_coeff_air.csv").exists():
+                            fispact_dose_rates = _calculate_fispact_dose(results, data_dir)
+                            if i-2 < len(fispact_dose_rates):  # i-2 because FISPACT skips first 2 steps
+                                dose_rates.append(fispact_dose_rates[i-2])
+                            else:
+                                dose_rates.append(0.0)
+                        else:
+                            dose_rates.append(0.0)
+                    except Exception as fispact_error:
+                        print(f"  FISPACT fallback also failed: {fispact_error}")
+                        dose_rates.append(0.0)
+                    continue
+                     
+            except Exception as e:
+                print(f"ERROR: Photon transport failed for {time_label}: {e}")
+                print(f"  Falling back to FISPACT dose calculation...")
+                try:
+                    # Fallback to FISPACT dose calculation
+                    data_dir = Path(__file__).parent / 'data'
+                    if (data_dir / "mass_energy_abs_coeff_air.csv").exists():
+                        fispact_dose_rates = _calculate_fispact_dose(results, data_dir)
+                        if i-2 < len(fispact_dose_rates):  # i-2 because FISPACT skips first 2 steps
+                            dose_rates.append(fispact_dose_rates[i-2])
+                        else:
+                            dose_rates.append(0.0)
+                    else:
+                        dose_rates.append(0.0)
+                except Exception as fispact_error:
+                    print(f"  FISPACT fallback also failed: {fispact_error}")
+                    dose_rates.append(0.0)
+                continue
+                 
+            with openmc.StatePoint(statepoint_file) as sp:
+                tally = sp.get_tally(name="photon_dose_on_mesh")
+                
+                # DEBUG: Check tally statistics
+                raw_mean = tally.mean.flatten()
+                raw_std = tally.std_dev.flatten()
+                non_zero_cells = np.sum(raw_mean > 0)
+                print(f"DEBUG: Tally statistics:")
+                print(f"  - Non-zero mesh cells: {non_zero_cells}/{len(raw_mean)}")
+                print(f"  - Raw tally range: {np.min(raw_mean):.2e} - {np.max(raw_mean):.2e}")
+                print(f"  - Raw tally mean: {np.mean(raw_mean):.2e}")
+                print(f"  - Relative error: {np.mean(raw_std[raw_mean > 0])/np.mean(raw_mean[raw_mean > 0])*100:.1f}%" if non_zero_cells > 0 else "  - Relative error: N/A")
+                
+                # Convert from pSv-cm^3/source-particle to uSv/h
+                # The tally gives dose per source particle, but we need total dose rate
+                volume = mesh.volumes[0][0][0]
+                print(f"DEBUG: Mesh cell volume: {volume:.2e} cm³")
+                
+                # Scaling breakdown:
+                # 1. tally.mean is in pSv⋅cm³/source-particle 
+                # 2. multiply by total_photon_rate (photons/s) to get pSv⋅cm³/s
+                # 3. divide by volume to get pSv/s  
+                # 4. multiply by 3600 to get pSv/h
+                # 5. multiply by 1e-6 to get µSv/h
+                
+                scaling_factor = total_photon_rate * 1e-6 * 3600 / volume
+                print(f"DEBUG: Scaling factor breakdown:")
+                print(f"  - Total photon rate: {total_photon_rate:.2e} photons/s")
+                print(f"  - Volume normalization: 1/{volume:.2e} = {1/volume:.2e} /cm³")
+                print(f"  - Unit conversion: 1e-6 * 3600 = {1e-6 * 3600:.2e} (pSv→µSv, s→h)")
+                print(f"  - Final scaling factor: {scaling_factor:.2e}")
+                
+                dose_mean = raw_mean * scaling_factor
+                average_dose = np.mean(dose_mean)
+                max_dose = np.max(dose_mean)
+                
+                print(f"DEBUG: Final dose values:")
+                print(f"  - Average dose rate: {average_dose:.2e} µSv/h")
+                print(f"  - Maximum dose rate: {max_dose:.2e} µSv/h")
+                
+                # Compare with reference values
+                ref_low, ref_high = get_reference_dose_rates(element, cooling_time)
+                print(f"DEBUG: Reference comparison:")
+                print(f"  - Expected range: {ref_low:.2e} - {ref_high:.2e} µSv/h")
+                if average_dose < ref_low:
+                    ratio = ref_low / average_dose if average_dose > 0 else float('inf')
+                    print(f"  - RESULT TOO LOW by factor of {ratio:.1e}")
+                elif average_dose > ref_high:
+                    ratio = average_dose / ref_high
+                    print(f"  - RESULT TOO HIGH by factor of {ratio:.1e}")
+                else:
+                    print(f"  - Result within expected range")
+                
+                dose_rates.append(average_dose)
+                
+                # Finalize the OpenMC process to release file handles
+                openmc.lib.finalize()
+                
+                # Plot the dose map - add validation for LogNorm
+                try:
+                    # Check if tally data is valid for LogNorm (no zeros, negative values, or NaN)
+                    tally_data = tally.mean.flatten() * scaling_factor
+                    valid_data = tally_data[~np.isnan(tally_data) & (tally_data > 0)]
+                    
+                    if len(valid_data) > 0 and np.max(valid_data) > np.min(valid_data):
+                        # Data is valid for LogNorm
+                        plot_norm = LogNorm(vmin=max(np.min(valid_data), 1e-10), vmax=np.max(valid_data))
+                    else:
+                        # Fall back to linear normalization
+                        plot_norm = None
+                        print(f"Warning: Using linear scale for dose plot due to invalid data for log scale")
+                    
+                    plot = plot_mesh_tally(
+                        tally=tally,
+                        basis="xz",
+                        value="mean",
+                        colorbar_kwargs={'label': "Decay photon dose [µSv/h]"},
+                        norm=plot_norm,
+                        volume_normalization=False,
+                        scaling_factor=scaling_factor,
+                    )
+                    plot.figure.savefig(photon_outdir / f'dose_map_{element}_{workflow}_time_{cooling_time}s.png')
+                except Exception as e:
+                    print(f"Warning: Could not create dose plot for {element} at time {cooling_time}s: {e}")
+                    # Continue without plotting
+    else:
+        # For FISPACT workflows (path_a and path_b), dose_rates were already calculated using FISPACT formula
+        print(f"\nSkipping photon transport for {workflow} workflow (dose already calculated using FISPACT formula)")
 
     # --- Store results ---
     output_filename = f"{element}_{workflow}.h5"
@@ -914,6 +1111,7 @@ def run_element(element,
     
     # --- Create summary table and plot ---
     print(f"\nDose Rate Summary for {element}:")
+    print(f"DEBUG: Summary formatting - dose_rates are in µSv/h, converted to Sv/h for display")
     print("-"*70)
     print(f"{'Time':<20} {'Dose Rate (Sv/h)':<20} {'Reference (Sv/h)':<20} {'Status':<10}")
     print("-"*70)
@@ -952,7 +1150,9 @@ def run_element(element,
         100*365*24*3600: 1e-4    # 0.0001 Sv/h at 100 years
     }
     
-    for i, (time_s, dose_uSv) in enumerate(zip(TIMES, dose_rates)):
+    # Only use the times that correspond to available dose rates
+    available_times = TIMES[:len(dose_rates)]
+    for i, (time_s, dose_uSv) in enumerate(zip(available_times, dose_rates)):
         dose_Sv = dose_uSv * 1e-6  # Convert µSv/h to Sv/h
         ref_Sv = reference_values_Sv.get(time_s, 1e-4)
         
@@ -975,8 +1175,9 @@ def run_element(element,
     
     fig, ax = plt.subplots(figsize=(10, 6))
     
-    # Convert to years for x-axis
-    times_years = np.array(TIMES) / (365.25 * 24 * 3600)
+    # Convert to years for x-axis - only use available times
+    available_times = TIMES[:len(dose_rates)]
+    times_years = np.array(available_times) / (365.25 * 24 * 3600)
     doses_Sv = np.array(dose_rates) * 1e-6  # Convert to Sv/h
     
     # Plot calculated dose rates
