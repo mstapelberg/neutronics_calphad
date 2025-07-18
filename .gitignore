@@ -8,6 +8,8 @@ __pycache__/
 
 results/
 
+neutronics_calphad/results/
+
 # Distribution / packaging
 .Python
 build/
