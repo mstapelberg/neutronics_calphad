@@ -7,6 +7,7 @@ __pycache__/
 *.so
 
 results/
+local_examples/
 
 neutronics_calphad/results/
 
