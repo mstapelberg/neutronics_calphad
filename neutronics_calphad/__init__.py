@@ -33,6 +33,7 @@ from .utils.visualization import (
 # --- Optimizer API ---
 from .optimizer.evaluate import evaluate
 from .optimizer.manifold import sample_simplex, build_manifold
+from .optimizer.bayesian_optimizer import BayesianOptimizer
 
 # --- Expose common constants (if needed) ---
 #from .neutronics.library import ELMS, TIMES
@@ -48,6 +49,7 @@ __all__ = [
     # CALPHAD
     "DepletionResult", "mix", "ActivationConstraints", "ActivationManifold",
     "CALPHADBatchCalculator", "BayesianSearcher", "OutlierDetector",
+    "BayesianOptimizer",
 
     # Utilities
     "sample_simplex", "build_manifold",
