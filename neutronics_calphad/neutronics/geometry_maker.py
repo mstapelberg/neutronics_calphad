@@ -246,11 +246,12 @@ GEOMETRY_BUILDERS = {
     'spherical': _build_spherical_geometry,
 }
 
-def create_model(config: dict):
+def create_model(config: dict, xml_save_path: str = None):
     """Creates an OpenMC model from a configuration dictionary.
     
     Args:
         config (dict): A dictionary defining the model parameters.
+        xml_save_path (str): A directory to save the necessary materials.xml file for the .get_microxs_and_flux function.
 
     Returns:
         openmc.Model: The complete OpenMC model for the simulation.
@@ -282,6 +283,8 @@ def create_model(config: dict):
     settings.particles = settings_config.get('particles', 10000)
     
     model = openmc.model.Model(materials=openmc_materials, geometry=geometry, settings=settings)
+    if xml_save_path:
+        model.export_to_xml(os.path.join(xml_save_path, 'model_xmls'))
     
     # Attach vv_cell to model for later use if it exists
     for cell in geometry.get_all_cells().values():

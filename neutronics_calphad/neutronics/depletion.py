@@ -9,16 +9,15 @@ import openmc
 import openmc.deplete
 from pathlib import Path
 from typing import List, Dict, Any
-
-from .flux import calculate_actual_flux, E_PER_FUSION_eV, UNITS_EV_TO_J
-
+import os
 
 def run_independent_depletion(model: openmc.Model, 
-                             collapsed_microxs: openmc.deplete.MicroXS, 
+                             depletable_cell: str,
+                             microxs: openmc.deplete.MicroXS, 
                              flux: np.ndarray, 
                              chain_file: str, 
                              timesteps: List[float], 
-                             power: float, 
+                             source_rates: List[float],
                              outdir: Path) -> openmc.deplete.Results:
     """Run depletion calculation with IndependentOperator using collapsed cross sections.
     
@@ -37,44 +36,29 @@ def run_independent_depletion(model: openmc.Model,
     Raises:
         ValueError: If no depletable materials are found or vcrti material is missing.
     """
-    # Calculate actual flux from fusion power
-    actual_flux = calculate_actual_flux(flux, power)
+
     
-    # Find the vcrti material (the one we calculated flux/XS for)
-    vcrti_material = None
-    for mat in model.materials:
-        if mat.name == 'vcrti' and mat.depletable:
-            vcrti_material = mat
-            break
+    cell = model.geometry.get_cells_by_name(depletable_cell)[0]
+    # gets the first material object in the dictionary
+    material = next(iter(cell.get_all_materials().values())) 
+
     
-    if vcrti_material is None:
-        # Fallback to first depletable material
-        depletable_mats = [m for m in model.materials if m.depletable]
-        if not depletable_mats:
-            raise ValueError("No depletable materials found")
-        vcrti_material = depletable_mats[0]
-        print(f"Warning: vcrti material not found, using {vcrti_material.name}")
-    
-    print(f"Using material for depletion: {vcrti_material.name}")
+    print(f"Using material for depletion: {material.name}")
     
     # Create IndependentOperator with the collapsed cross sections
     # Only pass the material we have flux/XS data for
     op = openmc.deplete.IndependentOperator(
-        materials=[vcrti_material],      # Only the material we calculated flux/XS for
-        fluxes=[actual_flux],            # List of flux arrays (one per material domain)
-        micros=[collapsed_microxs],      # List of MicroXS objects (one per material domain)
+        materials=[material],      # Only the material we calculated flux/XS for
+        fluxes=[flux],            # List of flux arrays (one per material domain)
+        micros=[microxs],      # List of MicroXS objects (one per material domain)
         chain_file=str(chain_file),
         normalization_mode='source-rate',
-        reduce_chain=True,               # Enable chain reduction
         reduce_chain_level=8             # More aggressive chain reduction to avoid small concentrations
     )
     
-    # Set up time steps and source rates (irradiation followed by cooling)
-    source_rate = power / (E_PER_FUSION_eV * UNITS_EV_TO_J)
-    source_rates = [source_rate] + [0.0] * (len(timesteps) - 1)  # Irradiation then cooling
     
     # Use CECM integrator with tighter tolerance to handle numerical issues
-    integrator = openmc.deplete.CECMIntegrator(
+    integrator = openmc.deplete.PredictorIntegrator(
         op, 
         timesteps, 
         source_rates=source_rates,
@@ -91,63 +75,84 @@ def run_independent_depletion(model: openmc.Model,
     }
     
     print("Running depletion with enhanced numerical stability settings...")
-    integrator.integrate(path=str(outdir / "depletion_results.h5"))
+    integrator.integrate(path=str(os.path.join(outdir, "depletion_results.h5")))
     
-    return openmc.deplete.Results(outdir / "depletion_results.h5")
+    return openmc.deplete.Results(os.path.join(outdir, "depletion_results.h5"))
 
 
-def extract_gas_production(results: openmc.deplete.Results, 
-                          material_id: int) -> Dict[str, float]:
+def extract_gas_production(results: openmc.deplete.Results) -> Dict[str, float]:
     """Extract gas production data from depletion results.
     
     Args:
         results: Depletion results object.
-        material_id: ID of the material to analyze.
         
     Returns:
-        Dictionary mapping gas species to atom counts after irradiation.
+        Dictionary mapping gas categories to appm (atomic parts per million) after irradiation.
+        Returns 'He_appm' (sum of He3 + He4) and 'H_appm' (sum of H1 + H2 + H3).
     """
     gases = {}
     gas_species = ['He3', 'He4', 'H1', 'H2', 'H3']
     
+    # Get the material id from the results
+    material_id = list(results[0].index_mat.keys())[0]
+
     print(f"Gas production analysis:")
     print(f"  - Material ID: {material_id}")
     print(f"  - Number of time steps in results: {len(results)}")
+
+    # Get the final irradiation time step based on the source rates from the results 
+    # it will be the last non-zero source rate
+    source_rates = results.get_source_rates()
+    final_source_rate_index = np.nonzero(source_rates)[0][-1]
+    
+    # Get total number of atoms in the material at the final timestep
+    # We need to get all nuclides and sum their atoms
+    try:
+        # Get the material at the final timestep
+        final_material = results[final_source_rate_index].get_material(str(material_id))
+        # Get all nuclides in the material
+        all_nuclides = final_material.get_nuclides()
+        
+        # Sum all atoms for each nuclide
+        total_atoms = 0.0
+        for nuclide in all_nuclides:
+            times, numbers = results.get_atoms(material_id, nuclide)
+            total_atoms += numbers[final_source_rate_index]
+        
+        print(f"  - Total atoms in material: {total_atoms:.2e}")
+    except Exception as e:
+        print(f"  - Warning: Could not get total atoms: {e}")
+        total_atoms = 1.0  # Fallback to avoid division by zero
+    
+    # Initialize individual gas appm values
+    individual_gases = {}
     
     for gas in gas_species:
         try:
-            # Use Results.get_atoms() method - this is the correct API
-            times, atom_counts = results.get_atoms(material_id, gas, nuc_units="atoms")
-            print(f"  - {gas}: Found {len(atom_counts)} time points")
-            if len(atom_counts) > 0:
-                print(f"    Time 0 (initial): {atom_counts[0]:.2e} atoms")
-                if len(atom_counts) > 1:
-                    print(f"    Time 1 (after irradiation): {atom_counts[1]:.2e} atoms")
-                    gases[gas] = atom_counts[1]  # After irradiation, not initial
-                else:
-                    gases[gas] = atom_counts[0]
-            else:
-                gases[gas] = 0.0
-                print(f"    No data found for {gas}")
-            print(f"DEBUG: {gas} atoms after irradiation: {gases[gas]:.2e}")
+            times, numbers = results.get_atoms(material_id, gas)
+            gas_atoms = numbers[final_source_rate_index]
+            
+            # Convert to appm (atomic parts per million)
+            gas_appm = (gas_atoms / total_atoms) * 1e6 if total_atoms > 0 else 0.0
+            
+            individual_gases[gas] = gas_appm
+            print(f"  - {gas}: {gas_atoms:.2e} atoms = {gas_appm:.2f} appm")
+            
         except Exception as e:
-            print(f"Warning: Could not get {gas} atoms from results: {e}")
-            # Try alternative approach - check if the nuclide exists at all
-            try:
-                # Check if this gas nuclide is present in any time step
-                for i in range(len(results)):
-                    mat = results[i].get_material(str(material_id))
-                    nuclides = list(mat.get_nuclides())
-                    if gas in nuclides:
-                        print(f"  - {gas} found in time step {i}: {nuclides}")
-                        break
-                else:
-                    print(f"  - {gas} not found in any time step")
-            except:
-                pass
-            gases[gas] = 0.0
+            print(f"  - Warning: Could not get {gas} atoms: {e}")
+            individual_gases[gas] = 0.0
     
+    # Combine into categories expected by the evaluation function
+    gases['He_appm'] = individual_gases.get('He3', 0.0) + individual_gases.get('He4', 0.0)
+    gases['H_appm'] = individual_gases.get('H1', 0.0) + individual_gases.get('H2', 0.0) + individual_gases.get('H3', 0.0)
+    
+    print(f"  - Total He appm: {gases['He_appm']:.2f}")
+    print(f"  - Total H appm: {gases['H_appm']:.2f}")
+
     return gases
+
+
+    
 
 
 def analyze_neutron_activation(results: openmc.deplete.Results, 

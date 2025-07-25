@@ -4,6 +4,7 @@ I/O module for handling nuclear data and creating depletion chains.
 
 import argparse
 import math
+from typing import Dict
 from collections import defaultdict
 from io import StringIO
 from pathlib import Path
@@ -17,6 +18,32 @@ import openmc
 import openmc.data
 import openmc.deplete
 from openmc.deplete import Nuclide, FissionYieldDistribution, REACTIONS
+
+
+def material_string(comp_dict: Dict[str, float], bal_element: str) -> str:
+    """Generate a material string of the form 'bal_element-2Cr-4Ti-3W-1Zr'.
+
+    Args:
+        comp_dict (Dict[str, float]): Dictionary of element fractions.
+        bal_element (str): The balance element to use as prefix.
+
+    Returns:
+        str: Formatted material string.
+    """
+    parts = []
+    for element, value in comp_dict.items():
+        if element != bal_element:
+            parts.append(f"{int(round(value * 100))}{element}")
+    return f"{bal_element}-" + "-".join(parts)
+
+def create_material(comp_dict, material_name, bal_element = 'V', density = 6.11, percent_type = 'ao'):
+    new_material = openmc.Material()
+    new_material.set_density('g/cm3', density)
+    for element, percent in comp_dict.items():
+        new_material.add_element(element, percent, percent_type)
+    new_material.name = material_name
+    
+    return new_material
 
 def create_ccfe709_h5(data_dir: Path):
     """Reads CCFE-709 energy boundaries and saves them to HDF5.

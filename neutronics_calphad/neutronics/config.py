@@ -106,7 +106,7 @@ SPHERICAL = {
         'radius': 113,
         'layers': [
             {'name': 'first_wall', 'thickness': .2, 'material': 'tungsten'},
-            {'name': 'vessel', 'thickness': 2, 'material': 'vcrti'},
+            {'name': 'vessel', 'thickness': 2, 'material': 'vcrtiwzr'},
             {'name': 'blanket', 'thickness': 70, 'material': 'flibe'},
             {'name': 'tank', 'thickness': 5, 'material': 'steel'},
             {'name': 'shield', 'thickness': 30, 'material': 'boron_carbide'},
@@ -126,7 +126,7 @@ SPHERICAL = {
             'percent_type': 'ao',
             'depletable': True
         },
-        'vcrti': {
+        'vcrtiwzr': {
             'elements': {'V': 0.8, 'Cr': 0.05, 'Ti': 0.05, 'W': 0.05, 'Zr': 0.05},
             'density': ELEMENT_DENSITIES['V'],
             'depletable': True
@@ -155,6 +155,6 @@ SPHERICAL = {
         'run_mode': "fixed source",
         'batches': 10,
         'inactive': 0,
-        'particles': 1000,
+        'particles': 10000,
     }
 } 
