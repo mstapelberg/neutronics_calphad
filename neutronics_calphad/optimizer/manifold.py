@@ -8,7 +8,7 @@ import h5py
 import json
 from datetime import datetime
 from scipy.spatial import ConvexHull
-from .evaluate import evaluate
+from .evaluate_updated import evaluate_material
 from dataclasses import dataclass, field
 
 from neutronics_calphad.calphad.openmc_to_calphad import DepletionResult
@@ -266,7 +266,7 @@ def build_manifold(n=15000, workers=8):
     """
     comp = sample_simplex(n)
     with ProcessPoolExecutor(workers) as ex:
-        rows = list(ex.map(evaluate, comp))
+        rows = list(ex.map(evaluate_material, comp))
     df = pd.DataFrame(rows)
     df.to_parquet("manifold.parquet", compression="zstd")
     return df

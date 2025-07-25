@@ -5,6 +5,7 @@ This module contains functions for calculating neutron flux spectra,
 handling multi-group cross sections, and managing flux normalization
 for neutronics simulations.
 """
+import os
 import numpy as np
 import openmc
 import openmc.deplete
@@ -15,6 +16,9 @@ from typing import Tuple, List, Optional
 # Constants
 FUSION_ENERGY_MEV = 17.6 # eV per D-T fusion event
 MEV_TO_J = 1.602176634e-13
+POWER_MW = 500
+SOURCE_RATE = POWER_MW * 1e6 / (FUSION_ENERGY_MEV * MEV_TO_J)
+
 
 
 def get_flux_and_microxs(model: openmc.Model, 
@@ -38,103 +42,94 @@ def get_flux_and_microxs(model: openmc.Model,
     # get the number of energy groups from the group structure string there will be a number after the -
     num_groups = int(group_structure.split('-')[1])
 
-    flux_file = outdir / f"flux_spectrum_{num_groups}.txt"
-    microxs_csv = outdir / f"microxs_{num_groups}.csv"
-    fispact_flux_file = outdir / f"fispact_flux_{num_groups}.txt"
+    flux_file = os.path.join(outdir, f"flux_spectrum_{num_groups}.txt")
+    microxs_csv = os.path.join(outdir, f"microxs_{num_groups}.csv")
+    fispact_flux_file = os.path.join(outdir, f"fispact_flux_{num_groups}.txt")
 
-    depletable_mats = [m for m in model.materials if m.depletable]
-    if not depletable_mats:
-        raise ValueError("No depletable materials found in the model.")
+    cells = list(model.geometry.get_all_cells().values())
+
 
     # Get multi-group flux and cross sections using UKAEA-1102 structure
     flux_list, microxs_list = openmc.deplete.get_microxs_and_flux(
         model,
-        depletable_mats,
+        cells,
         energies=group_structure,  
         chain_file=chain_file,
-        run_kwargs={'cwd': str(outdir)}
+        run_kwargs={'cwd': str(outdir)},
+        path_statepoint=os.path.join(outdir, f"statepoint_{num_groups}.h5")
     )
 
-    # Focus on the vacuum vessel material ('vcrti')
-    try:
-        vcrti_index = [m.name for m in depletable_mats].index('vcrti')
-        flux = flux_list[vcrti_index]
-        microxs = microxs_list[vcrti_index]
-        vv_material = depletable_mats[vcrti_index]
-    except ValueError:
-        print("Warning: 'vcrti' material not found. Using the first depletable material.")
-        flux = flux_list[0]
-        microxs = microxs_list[0]
-        vv_material = depletable_mats[0]
+    VESSEL_CELL = next(i for i, c in enumerate(cells) if c.name == 'vessel')
 
     # Get material volume for proper flux normalization
-    material_volume = getattr(vv_material, 'volume', None)
+    material_volume = cells[VESSEL_CELL].volume
     if material_volume is None:
         print("Warning: Material volume not set. Using estimated VV volume.")
         material_volume = 2.13e5  # cm³, estimated quarter-torus VV volume
 
-    print(f"Material: {vv_material.name}")
-    print(f"Material volume: {material_volume:.2e} cm³")
-    print(f"Flux spectrum: {len(flux)} energy groups")
+    print(f"Cell: {cells[VESSEL_CELL].name}")
+    print(f"Cell volume: {material_volume:.2e} cm³")
+    print(f"Flux spectrum: {len(flux_list[VESSEL_CELL])} energy groups")
     
     # Debug: Check what openmc.deplete.get_microxs_and_flux returns
     print(f"DEBUG: OpenMC flux analysis:")
-    print(f"  - Flux array shape: {flux.shape}")
+    print(f"  - Flux array shape: {flux_list[VESSEL_CELL].shape}")
     print(f"  - Flux units from OpenMC: assumed to be neutrons/cm²/s per source neutron")
-    print(f"  - Total flux per source neutron: {np.sum(flux):.2e}")
-    if hasattr(flux, 'dtype'):
-        print(f"  - Flux dtype: {flux.dtype}")
+    print(f"  - Total flux per source neutron: {np.sum(flux_list[VESSEL_CELL]):.2e}")
+    if hasattr(flux_list[VESSEL_CELL], 'dtype'):
+        print(f"  - Flux dtype: {flux_list[VESSEL_CELL].dtype}")
     
     # Save flux spectrum for internal use
     flux_data = {
-        'energy_groups': len(flux),
+        'energy_groups': len(flux_list[VESSEL_CELL]),
         'material_volume_cm3': material_volume,
-        'flux_per_source_neutron': flux.tolist()
+        'flux_per_source_neutron': flux_list[VESSEL_CELL].tolist()
     }
     
     with open(flux_file, 'w') as f:
         f.write("# OpenMC Flux Spectrum\n")
-        f.write(f"# Material: {vv_material.name}\n")
+        f.write(f"# Cell: {cells[VESSEL_CELL].name}\n")
         f.write(f"# Volume: {material_volume:.6e} cm³\n")
-        f.write(f"# Energy groups: {len(flux)}\n")
+        f.write(f"# Energy groups: {len(flux_list[VESSEL_CELL])}\n")
         f.write("# Flux values are per source neutron\n")
-        for i, phi in enumerate(flux):
+        for i, phi in enumerate(flux_list[VESSEL_CELL]):
             f.write(f"{i+1:4d} {phi:.6e}\n")
+        f.write(f"# OpenMC Flux Spectrum, Cell: {cells[VESSEL_CELL].name}")
     
     # Save cross sections to CSV (simple format for easy manipulation)
-    microxs.to_csv(microxs_csv)
-    print(f"Saved {len(microxs.nuclides)} nuclides with cross sections to {microxs_csv}")
+    microxs_list[VESSEL_CELL].to_csv(microxs_csv)
+    print(f"Saved {len(microxs_list[VESSEL_CELL].nuclides)} nuclides with cross sections to {microxs_csv}")
     
     # Create FISPACT-compatible flux file (normalized per unit volume)
     # FISPACT expects flux in neutrons/cm²/s, so we normalize by volume
-    flux_per_cm3 = flux / material_volume
+    flux_per_cm3 = flux_list[VESSEL_CELL] / material_volume * SOURCE_RATE
     
     # Debug: Check if flux normalization seems reasonable
     print(f"DEBUG: Flux normalization check:")
-    print(f"  - Flux per source neutron (total): {np.sum(flux):.2e}")
+    print(f"  - Flux per source neutron (total): {np.sum(flux_list[VESSEL_CELL]):.2e}")
     print(f"  - Material volume: {material_volume:.2e} cm³")
     print(f"  - Flux per cm³ per source neutron: {np.sum(flux_per_cm3):.2e}")
     
     # Sanity check: flux per source neutron should be << 1
-    if np.sum(flux) > 1:
-        print(f"WARNING: Flux per source neutron ({np.sum(flux):.1e}) seems high!")
+    if np.sum(flux_list[VESSEL_CELL]) > 1:
+        print(f"WARNING: Flux per source neutron ({np.sum(flux_list[VESSEL_CELL]):.1e}) seems high!")
         print(f"         Expected: < 1 (flux should be less than 1 per source neutron)")
         print(f"         This suggests the flux may not be per-source-neutron normalized")
         
         # Check if this is a cross-section weighted flux
         print(f"DEBUG: Flux analysis:")
-        print(f"  - Max flux in any group: {np.max(flux):.2e}")
-        print(f"  - Min flux in any group: {np.min(flux[flux > 0]):.2e}")
-        print(f"  - Number of non-zero groups: {np.sum(flux > 0)}")
+        print(f"  - Max flux in any group: {np.max(flux_list[VESSEL_CELL]):.2e}")
+        print(f"  - Min flux in any group: {np.min(flux_list[VESSEL_CELL][flux_list[VESSEL_CELL] > 0]):.2e}")
+        print(f"  - Number of non-zero groups: {np.sum(flux_list[VESSEL_CELL] > 0)}")
         print(f"  - This may be a volume-averaged or cross-section weighted flux")
     
     with open(fispact_flux_file, 'w') as f:
-        f.write(f"{len(flux)}\n")  # Number of energy groups
+        f.write(f"{len(flux_list[VESSEL_CELL])}\n")  # Number of energy groups
         for phi in flux_per_cm3:
             f.write(f"{phi:.6e}\n")  # Flux per cm³ per source neutron
     
     print(f"Saved FISPACT-compatible flux (normalized per cm³) to {fispact_flux_file}")
-    print(f"  - Total flux per source neutron: {np.sum(flux):.2e}")
+    print(f"  - Total flux per source neutron: {np.sum(flux_list[VESSEL_CELL]):.2e}")
     print(f"  - Total flux per cm³ per source neutron: {np.sum(flux_per_cm3):.2e}")
     
     return flux_file, microxs_csv

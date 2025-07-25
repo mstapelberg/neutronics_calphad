@@ -172,9 +172,9 @@ def contact_dose(
 
     # ----------------------------------------------------------------------
     for step_idx, act in enumerate(activities):
-        print(f"DEBUG: Processing time step {step_idx}")
-        print(f"DEBUG: Number of active nuclides: {len(act)}")
-        print(f"DEBUG: Nuclides with activity: {list(act.keys())}")
+        #print(f"DEBUG: Processing time step {step_idx}")
+        #print(f"DEBUG: Number of active nuclides: {len(act)}")
+        #print(f"DEBUG: Nuclides with activity: {list(act.keys())}")
         
         m_total = 0.0
         mass_Z: Dict[int, float] = {}

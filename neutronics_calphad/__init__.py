@@ -31,7 +31,7 @@ from .utils.visualization import (
 )
 
 # --- Optimizer API ---
-from .optimizer.evaluate import evaluate
+from .optimizer.parsers import parse_openmc_results, parse_calphad_results, check_constraints
 from .optimizer.manifold import sample_simplex, build_manifold
 
 # --- Expose common constants (if needed) ---

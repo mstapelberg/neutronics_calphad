@@ -1,5 +1,6 @@
 import numpy as np
 import openmc
+from typing import Union, Callable
 from neutronics_calphad.neutronics.dose import contact_dose
 from neutronics_calphad.neutronics.depletion import extract_gas_production
 
@@ -23,15 +24,28 @@ def evaluate_material(
     chain_file: str,
     abs_file: str,
     critical_gas_limits: dict = CRITICAL_GAS_LIMITS,
-    dose_limits: dict = DOSE_LIMITS
+    dose_limits: dict = DOSE_LIMITS,
+    *,
+    score: Union[str, Callable] = "ternary",
 ) -> float:
     """
     Evaluate a depletion result for both contact dose and gas‐production limits.
 
-    Returns:
-        1.0 if all limits passed,
-        0.5 if either dose OR gas passed,
-        0.0 if both failed.
+    Parameters
+    ----------
+    score
+        Scoring strategy to use. ``"ternary"`` reproduces the historical
+        behaviour of returning ``1.0``, ``0.5`` or ``0.0`` depending on whether
+        the dose and gas limits are met. ``"continuous"`` returns a
+        normalised score between 0 and 1 based on how far the material is from
+        the respective limits.  A custom callable can also be provided which
+        receives the boolean flags ``satisfy_dose`` and ``satisfy_gas`` as well
+        as the dictionaries ``dose_at_limit`` and ``gas_production_rates``.
+
+    Returns
+    -------
+    float
+        The calculated fitness score.
     """
 
     # 1) Compute full dose‐time series
@@ -67,6 +81,7 @@ def evaluate_material(
 
     # 7) Check each cooling‐time limit
     satisfy_dose = True
+    dose_at_limit = {}
     for days_after, limit in dose_limits.items():
         target_s = days_after * 24 * 3600
         # first index in cool_times >= target_s
@@ -85,6 +100,7 @@ def evaluate_material(
             f"{rate_actual:.2e} Sv/h/kg   vs limit {limit:.2e} Sv/h/kg"
         )
 
+        dose_at_limit[days_after] = rate_actual
         if rate_actual > limit:
             satisfy_dose = False
 
@@ -96,10 +112,25 @@ def evaluate_material(
         if produced > limit:
             satisfy_gas = False
 
-    # 9) Return fitness
-    if satisfy_dose and satisfy_gas:
-        return 1.0
-    elif satisfy_dose or satisfy_gas:
-        return 0.5
+    # 9) Compute score 
+    if isinstance(score, str):
+        mode = score.lower()
+        if mode == "ternary":
+            return 1.0 if (satisfy_dose and satisfy_gas) else 0.5 if (satisfy_dose or satisfy_gas) else 0.0
+        elif mode == 'continuous': 
+            dose_scores = [max(0.0, 1 - dose_at_limit[d] / dose_limits[d]) for d in dose_limits]
+            gas_scores = [max(0.0, 1 - gas_production_rates.get(g, 0.0) / critical_gas_limits.get(g, np.inf)) for g in critical_gas_limits]
+            return float((np.mean(dose_scores) + np.mean(gas_scores)) / 2)
+        else:
+            raise ValueError(f"Invalid score mode: {score}")
+    elif callable(score):
+        return float(score(
+            satisfy_dose=satisfy_dose,
+            satisfy_gas=satisfy_gas,
+            dose_at_limit=dose_at_limit,
+            gas_production_rates=gas_production_rates,
+            dose_limits=dose_limits,
+            gas_limits=critical_gas_limits,
+        ))
     else:
-        return 0.0
+        raise TypeError(f"score must be a string or callable")
