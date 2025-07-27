@@ -20,12 +20,13 @@ import openmc.deplete
 from openmc.deplete import Nuclide, FissionYieldDistribution, REACTIONS
 
 
-def material_string(comp_dict: Dict[str, float], bal_element: str) -> str:
-    """Generate a material string of the form 'bal_element-2Cr-4Ti-3W-1Zr'.
+def material_string(comp_dict: Dict[str, float], bal_element: str, precision: int = 2) -> str:
+    """Generate a material string of the form 'bal_element-2.1Cr-3.0Ti-4.2W-6.0Zr'.
 
     Args:
         comp_dict (Dict[str, float]): Dictionary of element fractions.
         bal_element (str): The balance element to use as prefix.
+        precision (int): Number of decimal places to include (default: 1).
 
     Returns:
         str: Formatted material string.
@@ -33,7 +34,12 @@ def material_string(comp_dict: Dict[str, float], bal_element: str) -> str:
     parts = []
     for element, value in comp_dict.items():
         if element != bal_element:
-            parts.append(f"{int(round(value * 100))}{element}")
+            # Round to specified precision and format
+            rounded_value = round(value * 100, precision)
+            if precision == 0:
+                parts.append(f"{int(rounded_value)}{element}")
+            else:
+                parts.append(f"{rounded_value:.{precision}f}{element}")
     return f"{bal_element}-" + "-".join(parts)
 
 def create_material(comp_dict, material_name, bal_element = 'V', density = 6.11, percent_type = 'ao'):

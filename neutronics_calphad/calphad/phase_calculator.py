@@ -4,6 +4,14 @@ from typing import List, Dict, Optional
 import json
 import logging
 import warnings
+import time
+
+try:
+    from tqdm import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
+    warnings.warn("TQDM not available. Progress bars will not be shown.")
 
 try:
     from tc_python import TCPython, ThermodynamicQuantity
@@ -41,7 +49,7 @@ class CALPHADBatchCalculator:
         self.fixed_impurities = fixed_impurities or {
             'C': 290e-6,  # 290 appm
             'N': 440e-6,  # 440 appm
-            'O': 470e-6   # 470 appm
+            #'O': 470e-6   # 470 appm # TCHEA7 does not have O, but TCHEA8 does 
         }
         
         if not TC_AVAILABLE:
@@ -92,8 +100,9 @@ class CALPHADBatchCalculator:
             for impurity, fraction in self.fixed_impurities.items():
                 calc_setup.set_condition(f"X({impurity})", fraction)
                 
-            # Calculate for each composition
-            for comp in compositions:
+            # Calculate for each composition with progress bar
+            iterator = tqdm(compositions, desc="CALPHAD calculations", unit="comp") if TQDM_AVAILABLE else compositions
+            for comp in iterator:
                 # Normalize main elements to account for impurities
                 impurity_sum = sum(self.fixed_impurities.values())
                 main_sum = 1.0 - impurity_sum
