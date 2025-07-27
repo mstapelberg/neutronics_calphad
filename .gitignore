@@ -9,6 +9,7 @@ __pycache__/
 results/
 local_examples/
 *_cache/
+examples/analysis_results/
 
 neutronics_calphad/results/
 
