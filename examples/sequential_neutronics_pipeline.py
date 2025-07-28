@@ -36,7 +36,7 @@ from neutronics_calphad.optimizer.convergence import compute_feasible_volume
 
 # -----------------------------------------------------------------------------
 # Configuration
-PIPELINE_NAME = "sequential_materials_pipeline_run_1"
+PIPELINE_NAME = os.path.join("analysis_results","sequential_materials_pipeline_run_1")
 RESULTS_DIR = PIPELINE_NAME
 NEUTRONICS_RESULTS_FILE = os.path.join(RESULTS_DIR, "neutronics_optimization_results.json")
 CALPHAD_RESULTS_FILE = os.path.join(RESULTS_DIR, "calphad_results.json")
@@ -56,6 +56,7 @@ ELEMENTS = ['V', 'Cr', 'Ti', 'W', 'Zr']
 
 # OpenMC parameters
 OPENMC_NUM_PARTICLES = 10000
+TORUS_TO_SPHERE_VOLUME_RATIO = 1/4.03 # from notebooks/compare_volume_spherical_toroidal.ipynb
 
 # Composition constraints for V-based alloy
 MIN_COMPOSITIONS = {'V': 0.70}
@@ -72,7 +73,7 @@ DOSE_LIMITS = {14: 1e5, 365: 1, 3650: 1e-2, 36500: 1e-4} # changed the maintenan
 PHASE_LIMITS = {"*" : 0.005}
 
 # Pipeline parameters
-NEUTRONICS_MAX_ITERATIONS = 50
+NEUTRONICS_MAX_ITERATIONS = 100
 NEUTRONICS_BATCH_SIZE = 10
 NEUTRONICS_CONVERGENCE_TOLERANCE = 0.05
 NUMBER_SUGGESTED_COMPOSITIONS = 10000
@@ -234,9 +235,10 @@ def setup_openmc_model():
     
     # Time scheduler
     POWER_MW = 500
+    TORUS_TO_SPHERE_VOLUME_RATIO = 1/4.03 # from notebooks/compare_volume_spherical_toroidal.ipynb
     FUSION_POWER_MEV = 17.6
     MEV_TO_J = 1.602176634e-13
-    SOURCE_RATE = POWER_MW * 1e6 / (FUSION_POWER_MEV * MEV_TO_J)
+    SOURCE_RATE = POWER_MW * 1e6 / (FUSION_POWER_MEV * MEV_TO_J) * TORUS_TO_SPHERE_VOLUME_RATIO
     
     scheduler = TimeScheduler(
         irradiation_time='1 year',
