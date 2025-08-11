@@ -181,6 +181,12 @@ def _replace_missing_fpy(parent, fpy_data, decay_data):
     # If the nuclide is in a ground state and a metastable state exists with
     # fission yields, copy the yields from the metastable
     name, A, m = openmc.data.zam(parent)
+    
+    # Handle case where name is atomic number instead of element symbol
+    if isinstance(name, int):
+        # Convert atomic number to element symbol
+        name = openmc.data.ATOMIC_SYMBOL[name]
+    
     if m == 0:
         parent_m1 = parent + "_m1"
         if parent_m1 in fpy_data:
@@ -190,6 +196,9 @@ def _replace_missing_fpy(parent, fpy_data, decay_data):
     n_neutrons = A - openmc.data.ATOMIC_NUMBER[name]
     for nuc, fpy in fpy_data.items():
         name_i, A_i, m_i = openmc.data.zam(nuc)
+        # Handle case where name_i is atomic number instead of element symbol
+        if isinstance(name_i, int):
+            name_i = openmc.data.ATOMIC_SYMBOL[name_i]
         if (A_i - openmc.data.ATOMIC_NUMBER[name_i]) == n_neutrons:
             return nuc
 
@@ -198,7 +207,8 @@ def _replace_missing_fpy(parent, fpy_data, decay_data):
 
 
 def create_chain(decay_files, fpy_files, neutron_files,
-        reactions=('(n,2n)', '(n,3n)', '(n,4n)', '(n,gamma)', '(n,p)', '(n,a)', '(n,t)', '(n,d)'),
+        #reactions=('(n,2n)', '(n,3n)', '(n,4n)', '(n,gamma)', '(n,p)', '(n,a)', '(n,t)', '(n,d)'),
+        reactions = ('(n,2n)', '(n,3n)', '(n,4n)','(n,gamma)','(n,p)', '(n,d)', '(n,t)', '(n,3He)', '(n,a)','(n,np)', '(n,nd)', '(n,nt)', '(n,n3He)', '(n,na)','(n,2p)', '(n,pa)'),
         progress=True
     ):
     """Create a depletion chain from ENDF files.
@@ -330,7 +340,11 @@ def create_chain(decay_files, fpy_files, neutron_files,
         if fissionable:
             if parent in fpy_data:
                 fpy = fpy_data[parent]
-                yield_energies = fpy.energies or [0.0]
+                # Fix for numpy array boolean evaluation
+                if fpy.energies is None or len(fpy.energies) == 0:
+                    yield_energies = [0.0]
+                else:
+                    yield_energies = fpy.energies
                 yield_data = {}
                 for E, yield_table in zip(yield_energies, fpy.independent):
                     yields = defaultdict(float)
