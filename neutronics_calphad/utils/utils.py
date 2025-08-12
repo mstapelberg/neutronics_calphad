@@ -4,7 +4,16 @@ Utility functions for neutronics calculations.
 This module contains helper functions, constants, and utilities
 that are shared across different parts of the neutronics_calphad package.
 """
-from typing import List, Dict, Any
+import os
+import json
+import numpy as np
+import pandas as pd
+from pathlib import Path
+from typing import Dict, List, Any, Optional, Tuple
+import warnings
+import sys
+import io
+import contextlib
 import openmc
 
 
@@ -327,3 +336,95 @@ def validate_config(config: Dict[str, Any]) -> Dict[str, Any]:
             validation['errors'].append("'geometry' must be a dictionary")
     
     return validation 
+
+
+def filter_openmc_warnings() -> None:
+    """Filter common OpenMC warnings that are not critical for analysis.
+    
+    This function suppresses warnings that are commonly encountered during
+    OpenMC simulations but don't affect the accuracy of results:
+    - LTT elastic scattering warnings (common with certain ENDF data)
+    - GNDS naming convention warnings
+    """
+    # Filter LTT elastic scattering warnings
+    warnings.filterwarnings(
+        "ignore", 
+        message=".*LTT.*elastic scattering.*Legendre only.*",
+        category=UserWarning
+    )
+    
+    # Filter GNDS naming convention warnings
+    warnings.filterwarnings(
+        "ignore", 
+        message=".*GNDS naming convention.*",
+        category=UserWarning
+    )
+    
+    # Filter other common OpenMC warnings
+    warnings.filterwarnings(
+        "ignore", 
+        message=".*cross_sections.*",
+        category=UserWarning
+    )
+
+
+@contextlib.contextmanager
+def suppress_openmc_warnings():
+    """Context manager to suppress OpenMC warnings that are printed to stdout/stderr.
+    
+    This captures and filters OpenMC warnings that bypass Python's warning system
+    and are printed directly to the console.
+    """
+    # Patterns to filter out
+    warning_patterns = [
+        "LTT.*elastic scattering.*Legendre only",
+        "LTT.*for elastic scattering.*using Legendre only",
+        "GNDS naming convention",
+        "cross_sections",
+    ]
+    
+    class WarningFilter:
+        def __init__(self, patterns: List[str]):
+            self.patterns = patterns
+            self.original_stdout = sys.stdout
+            self.original_stderr = sys.stderr
+            self.stdout_buffer = io.StringIO()
+            self.stderr_buffer = io.StringIO()
+        
+        def write(self, text: str) -> None:
+            # Check if the text contains any warning patterns
+            if any(pattern in text for pattern in self.patterns):
+                return  # Suppress the warning
+            self.original_stdout.write(text)
+        
+        def flush(self) -> None:
+            self.original_stdout.flush()
+    
+    # Create filter instances
+    stdout_filter = WarningFilter(warning_patterns)
+    stderr_filter = WarningFilter(warning_patterns)
+    
+    try:
+        # Replace stdout and stderr with filtered versions
+        sys.stdout = stdout_filter
+        sys.stderr = stderr_filter
+        yield
+    finally:
+        # Restore original stdout and stderr
+        sys.stdout = stdout_filter.original_stdout
+        sys.stderr = stderr_filter.original_stderr
+
+
+def run_with_warning_suppression(func, *args, **kwargs):
+    """Run a function while suppressing OpenMC warnings.
+    
+    Args:
+        func: Function to run
+        *args: Arguments to pass to the function
+        **kwargs: Keyword arguments to pass to the function
+        
+    Returns:
+        The result of calling func(*args, **kwargs)
+    """
+    with suppress_openmc_warnings():
+        return func(*args, **kwargs) 

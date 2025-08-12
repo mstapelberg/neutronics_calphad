@@ -13,7 +13,7 @@ from . import (
     plot_fispact_comparison, plot_fispact_flux,
     ARC_D_SHAPE, SPHERICAL
 )
-from .io import cmd_chain_builder, cmd_prepare_data
+from .utils.io import cmd_chain_builder, cmd_prepare_data
 
 
 CONFIGS = {

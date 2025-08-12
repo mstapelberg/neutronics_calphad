@@ -27,16 +27,17 @@ from neutronics_calphad.neutronics.depletion import run_independent_depletion
 from neutronics_calphad.neutronics.time_scheduler import TimeScheduler
 from neutronics_calphad.optimizer.evaluate_updated import evaluate_material
 from neutronics_calphad.utils.io import material_string, create_material
-from neutronics_calphad.optimizer.composition_sampler import CompositionSampler
+from neutronics_calphad.optimizer.bayesian_optimizer import BayesianOptimizer
 from neutronics_calphad.neutronics.flux import get_flux_and_microxs
 from neutronics_calphad.calphad.phase_calculator import CALPHADBatchCalculator
 from neutronics_calphad.optimizer.convergence import overall_convergence_check
 import scipy.spatial
 from neutronics_calphad.optimizer.convergence import compute_feasible_volume
+from neutronics_calphad.optimizer.composition_sampler import CompositionSampler
 
 # -----------------------------------------------------------------------------
 # Configuration
-PIPELINE_NAME = os.path.join("analysis_results","sequential_materials_pipeline_run_1")
+PIPELINE_NAME = "sequential_materials_pipeline_hypercube_test"
 RESULTS_DIR = PIPELINE_NAME
 NEUTRONICS_RESULTS_FILE = os.path.join(RESULTS_DIR, "neutronics_optimization_results.json")
 CALPHAD_RESULTS_FILE = os.path.join(RESULTS_DIR, "calphad_results.json")
@@ -56,7 +57,6 @@ ELEMENTS = ['V', 'Cr', 'Ti', 'W', 'Zr']
 
 # OpenMC parameters
 OPENMC_NUM_PARTICLES = 10000
-TORUS_TO_SPHERE_VOLUME_RATIO = 1/4.03 # from notebooks/compare_volume_spherical_toroidal.ipynb
 
 # Composition constraints for V-based alloy
 MIN_COMPOSITIONS = {'V': 0.70}
@@ -70,13 +70,13 @@ DOSE_LIMITS = {14: 1e5, 365: 1, 3650: 1e-2, 36500: 1e-4} # changed the maintenan
 
 # CALPHAD limits
 #PHASE_LIMITS = {'C15_LAVES': 0.001, 'C14_LAVES': 0.001, 'SIGMA': 0.001, 'CHI': 0.001, 'MU': 0.001}
-PHASE_LIMITS = {"*" : 0.005}
+PHASE_LIMITS = {"*" : 0.001}
 
 # Pipeline parameters
-NEUTRONICS_MAX_ITERATIONS = 100
+NEUTRONICS_MAX_ITERATIONS = 25
 NEUTRONICS_BATCH_SIZE = 10
 NEUTRONICS_CONVERGENCE_TOLERANCE = 0.05
-NUMBER_SUGGESTED_COMPOSITIONS = 10000
+
 
 class PipelineState:
     """Manages pipeline state and restart capability."""
@@ -137,17 +137,8 @@ def save_neutronics_results(results: Dict[str, Any]):
 
 def extract_neutronics_passing_compositions(results: Dict[str, Any]) -> List[Dict[str, float]]:
     """Extract compositions that pass neutronics constraints."""
-    # Check if we have the new format with good_compositions
-    if 'good_compositions' in results and results['good_compositions']:
-        # Convert from array format to dict format
-        passing_compositions = []
-        for comp_array in results['good_compositions']:
-            comp_dict = dict(zip(ELEMENTS, comp_array))
-            passing_compositions.append(comp_dict)
-        return passing_compositions
-    
-    # Fallback to old format
     passing_compositions = []
+    
     for iteration in results['iterations']:
         for material in iteration['materials']:
             if material['satisfy_dose'] and material['satisfy_gas']:
@@ -156,9 +147,9 @@ def extract_neutronics_passing_compositions(results: Dict[str, Any]) -> List[Dic
     return passing_compositions
 
 
-def create_restartable_sampler(existing_results: Optional[Dict[str, Any]]) -> Tuple[CompositionSampler, int]:
-    """Create sampler with optional restart from existing results."""
-    sampler = CompositionSampler(
+def create_restartable_optimizer(existing_results: Optional[Dict[str, Any]]) -> Tuple[BayesianOptimizer, int]:
+    """Create Bayesian optimizer with optional restart from existing results."""
+    optimizer = BayesianOptimizer(
         ELEMENTS,
         batch_size=NEUTRONICS_BATCH_SIZE,
         min_compositions=MIN_COMPOSITIONS,
@@ -177,9 +168,11 @@ def create_restartable_sampler(existing_results: Optional[Dict[str, Any]]) -> Tu
         for iteration in existing_results['iterations']:
             for material in iteration['materials']:
                 comp_array = material['composition_array']
+                # Check if we have the new format with neutronics_outputs
                 if 'neutronics_outputs' in material:
                     outputs = material['neutronics_outputs']
                 else:
+                    # Fallback for old format: reconstruct from individual values
                     dose_rates = material.get('dose_rates', {})
                     gas_production = material.get('gas_production', {})
                     outputs = [
@@ -194,15 +187,16 @@ def create_restartable_sampler(existing_results: Optional[Dict[str, Any]]) -> Tu
                 all_outputs.append(outputs)
         
         if all_compositions:
+            # Update optimizer with existing data
             compositions_array = np.array(all_compositions)
             outputs_array = np.array(all_outputs)
-            sampler.update(compositions_array, outputs_array)
+            optimizer.update(compositions_array, outputs_array)
             
             start_iteration = len(existing_results['iterations'])
             print(f"Loaded {len(all_compositions)} previous evaluations")
             print(f"Starting from iteration {start_iteration + 1}")
     
-    return sampler, start_iteration
+    return optimizer, start_iteration
 
 
 def setup_openmc_model():
@@ -235,10 +229,9 @@ def setup_openmc_model():
     
     # Time scheduler
     POWER_MW = 500
-    TORUS_TO_SPHERE_VOLUME_RATIO = 1/4.03 # from notebooks/compare_volume_spherical_toroidal.ipynb
     FUSION_POWER_MEV = 17.6
     MEV_TO_J = 1.602176634e-13
-    SOURCE_RATE = POWER_MW * 1e6 / (FUSION_POWER_MEV * MEV_TO_J) * TORUS_TO_SPHERE_VOLUME_RATIO
+    SOURCE_RATE = POWER_MW * 1e6 / (FUSION_POWER_MEV * MEV_TO_J)
     
     scheduler = TimeScheduler(
         irradiation_time='1 year',
@@ -345,34 +338,14 @@ def run_neutronics_optimization_stage(pipeline_state: PipelineState) -> Dict[str
     vessel_cell_idx = next(i for i, c in enumerate(model.geometry.get_all_cells().values()) if c.name == 'vessel')
     original_materials_count = len(model.materials)
     
-    # Create/restart sampler
-    sampler, start_iteration = create_restartable_sampler(existing_results)
+    # Create/restart optimizer
+    optimizer, start_iteration = create_restartable_optimizer(existing_results)
 
-    total_samples = NEUTRONICS_MAX_ITERATIONS * NEUTRONICS_BATCH_SIZE
+    sampler = CompositionSampler(ELEMENTS, batch_size=NEUTRONICS_BATCH_SIZE, min_compositions=MIN_COMPOSITIONS, max_compositions=MAX_COMPOSITIONS)
+    total_samples = 100  # Adjust as needed
     all_comps = sampler.suggest(total_samples)
 
-    # Initialize or load results
-    if existing_results:
-        optimization_results = existing_results
-    else:
-        optimization_results = {
-            'metadata': {
-                'timestamp': datetime.now().isoformat(),
-                'elements': ELEMENTS,
-                'critical_limits': CRIT_LIMITS,
-                'dose_limits': DOSE_LIMITS,
-                'composition_constraints': {
-                    'min': MIN_COMPOSITIONS,
-                    'max': MAX_COMPOSITIONS
-                },
-                'stage': 'neutronics_sampling',
-                'total_samples': total_samples,
-                'batch_size': NEUTRONICS_BATCH_SIZE
-            },
-            'iterations': []
-        }
-
-    for batch_idx in range(start_iteration * NEUTRONICS_BATCH_SIZE, total_samples, NEUTRONICS_BATCH_SIZE):
+    for batch_idx in range(0, total_samples, NEUTRONICS_BATCH_SIZE):
         batch = all_comps[batch_idx:batch_idx + NEUTRONICS_BATCH_SIZE]
         
         iteration_results = {
@@ -383,7 +356,7 @@ def run_neutronics_optimization_stage(pipeline_state: PipelineState) -> Dict[str
         outputs = []
         for comp in batch:
             comp_dict = dict(zip(ELEMENTS, comp))
-            mat_name = material_string(comp_dict, 'V', precision=1)
+            mat_name = material_string(comp_dict, 'V')
             material = create_material(comp_dict, mat_name)
             material.depletable = True
             
@@ -452,30 +425,24 @@ def run_neutronics_optimization_stage(pipeline_state: PipelineState) -> Dict[str
                   f"H={outputs_array[5]:.1f} appm (limit={CRIT_LIMITS['H_appm']:.1f})")
         
         sampler.update(batch, np.array(outputs))
-        optimization_results['iterations'].append(iteration_results)
-        save_neutronics_results(optimization_results)
-        pipeline_state.state['neutronics_iteration'] = iteration_results['iteration']
-        pipeline_state.save_state()
 
-    if not pipeline_state.is_stage_completed('neutronics'):
-        sampler.fit_surrogates()
+    sampler.fit_surrogates()
     
     # Sample good compositions
-    test_comps = sampler.suggest(NUMBER_SUGGESTED_COMPOSITIONS)  # Large test set
+    test_comps = sampler.suggest(10000)  # Large test set
     feasible = sampler.predict_feasibility(test_comps)
     good_comps = test_comps[feasible]
     print(f"Found {len(good_comps)} good compositions")
-    
-    # Update results with good_comps
-    optimization_results['metadata']['good_compositions_found'] = len(good_comps)
-    optimization_results['good_compositions'] = good_comps.tolist() if len(good_comps) > 0 else []
-    save_neutronics_results(optimization_results)
+    # Save or proceed to CALPHAD with good_comps
+
+    # Mark neutronics stage as completed
+    pipeline_state.update_stage('neutronics', completed=True)
     
     # Clean up
     while len(model.materials) > original_materials_count:
         model.materials.pop()
     
-    return optimization_results
+    return sampler.get_all_evaluations() # Return all evaluated compositions
 
 
 def run_calphad_stage(pipeline_state: PipelineState, neutronics_results: Dict[str, Any]) -> Dict[str, Any]:

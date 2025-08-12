@@ -9,11 +9,27 @@ import os
 import h5py
 from matplotlib.colors import LogNorm
 from pathlib import Path
+import warnings
 
 from .geometry_maker import create_model
 from openmc_regular_mesh_plotter import plot_mesh_tally
 from .config import ARC_D_SHAPE, ELEMENT_DENSITIES
 import copy
+
+# Filter common OpenMC warnings
+warnings.filterwarnings(
+    "ignore", 
+    message=".*LTT.*elastic scattering.*Legendre only.*",
+    category=UserWarning
+)
+warnings.filterwarnings(
+    "ignore", 
+    message=".*GNDS naming convention.*",
+    category=UserWarning
+)
+
+# Import the warning suppression context manager
+from ..utils.utils import suppress_openmc_warnings
 
 
 ELMS = ['V', 'Cr', 'Ti', 'W', 'Zr']
@@ -541,7 +557,8 @@ def run_element(element,
     # --- Setup depletion chain (with reduction) ---
     if use_reduced_chain:
         print("Preparing depletion chain with reduction...")
-        full_chain = openmc.deplete.Chain.from_xml(chain_file)
+        with suppress_openmc_warnings():
+            full_chain = openmc.deplete.Chain.from_xml(chain_file)
         
         # Get all nuclides from the model's depletable materials
         initial_nuclides = {n for mat in model.materials if mat.depletable for n in mat.get_nuclides()}

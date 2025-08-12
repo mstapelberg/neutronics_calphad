@@ -84,7 +84,7 @@ ARC_D_SHAPE = {
             'ion_temperature_separatrix': 0.1e3,
             'ion_temperature_peaking_factor': 8.06,
             'ion_temperature_beta': 6,
-            'pedestal_radius_factor': 0.8,
+            'pedestal_radius': 0.8,
             'mode': "H",
             'shafranov_factor': 0.0,
             'angles': (0, 1.5707963267948966), # pi/2

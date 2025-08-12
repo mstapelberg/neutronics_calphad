@@ -3,6 +3,7 @@
 import numpy as np
 from typing import Dict, List, Optional, Tuple, Union
 import logging
+import scipy.spatial
 
 logger = logging.getLogger(__name__)
 
@@ -319,3 +320,48 @@ def overall_convergence_check(
     results['summary'] = summary
     
     return results 
+
+
+def compute_feasible_volume(
+    predicted_values: Dict[str, np.ndarray],
+    compositions: np.ndarray,
+    limits: Dict[str, float],
+) -> float:
+    """Compute the convex hull volume of feasible compositions based on predictions.
+
+    Parameters
+    ----------
+    predicted_values : Dict[str, np.ndarray]
+        Predicted outputs for each target.
+    compositions : np.ndarray
+        Array of composition vectors.
+    limits : Dict[str, float]
+        Constraint limits for each target.
+
+    Returns
+    -------
+    float
+        Volume of the convex hull of feasible points, or 0 if insufficient points.
+    """
+    if len(predicted_values) == 0:
+        return 0.0
+
+    feasible_mask = np.ones(compositions.shape[0], dtype=bool)
+    for target, preds in predicted_values.items():
+        if target in limits:
+            # Convert to numpy if tensor
+            if not isinstance(preds, np.ndarray):
+                preds = preds.numpy()
+            feasible_mask &= (preds < limits[target])
+
+    feasible_points = compositions[feasible_mask]
+
+    if len(feasible_points) < compositions.shape[1]:
+        return 0.0
+
+    try:
+        hull = scipy.spatial.ConvexHull(feasible_points)
+        return hull.volume
+    except Exception as e:
+        logger.warning(f"Failed to compute convex hull: {e}")
+        return 0.0 
