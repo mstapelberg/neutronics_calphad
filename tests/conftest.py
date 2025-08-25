@@ -10,7 +10,8 @@ import h5py
 import numpy as np
 import pytest
 
-from neutronics_calphad.calphad import DepletionResult, ActivationConstraints
+from neutronics_calphad.calphad.openmc_to_calphad import DepletionResult
+from neutronics_calphad.optimizer.manifold import ActivationConstraints
 
 
 @pytest.fixture

@@ -10,32 +10,36 @@ logger = logging.getLogger(__name__)
 
 
 def parse_openmc_results(
-    results,  # openmc.deplete.Results
+    results: Any,  # openmc.deplete.Results
     chain_file: str,
-    abs_file: str
+    abs_file: str,
+    cooling_days: Optional[List[int]] = None,
 ) -> Dict[str, Any]:
-    """
-    Parse OpenMC depletion results to extract dose rates and gas production data.
-    
-    Parameters
-    ----------
-    results : openmc.deplete.Results
-        Depletion results object.
-    chain_file : str
-        Path to the depletion chain file.
-    abs_file : str
-        Path to the absorption cross-section file.
-        
-    Returns
-    -------
-    Dict[str, Any]
+    """Parse OpenMC depletion results into a uniform dictionary.
+
+    The function extracts per-nuclide dose contributions and aggregates them to
+    total dose rates, identifies the end of irradiation, and then samples dose
+    rates at specified cooling times (expressed in days).
+
+    Args:
+        results: OpenMC depletion results object.
+        chain_file: Path to the depletion chain XML file.
+        abs_file: Path to the photon mass attenuation database (ABS) file.
+        cooling_days: Optional list of cooling times in days for which dose
+            should be reported. If omitted, a default of ``[14, 365, 3650, 36500]``
+            (2 weeks, 1 year, 10 years, 100 years) is used.
+
+    Returns:
         Dictionary containing raw extracted data:
-        - dose_at_cooling_times: Dict mapping cooling days to dose rates (Sv/h/kg)
-        - gas_production: Dict mapping gas species to production rates (appm)
-        - times_s: Time series data
-        - source_rates: Source rate data
-        - final_irr_time: End of irradiation time
-        - cool_start_time: Start of cooling time
+        - ``dose_at_cooling_times``: Mapping of requested cooling days to dose
+          rates in Sv/h/kg.
+        - ``gas_production``: Mapping of gas species (e.g., ``He_appm``) to
+          production values.
+        - ``times_s``: Full time vector in seconds (list for JSON serializability).
+        - ``source_rates``: Source rate per step (list).
+        - ``final_irr_time``: Time in seconds at end of irradiation.
+        - ``cool_start_time``: Time in seconds of the first cooling step.
+        - ``total_dose_lookup``: Mapping of absolute time (seconds) to total dose.
     """
     from neutronics_calphad.neutronics.dose import contact_dose
     from neutronics_calphad.neutronics.depletion import extract_gas_production
@@ -64,11 +68,11 @@ def parse_openmc_results(
     # Build cooling-time array and corresponding doses
     cool_times = times_s[cool_start_idx:] - cool_start_time
     
-    # Extract dose rates at standard cooling times
-    standard_cooling_days = [14, 365, 3650, 36500]  # 14 days, 1 year, 10 years, 100 years
-    dose_at_cooling_times = {}
-    
-    for days_after in standard_cooling_days:
+    # Extract dose rates at requested cooling times (in days)
+    requested_days = cooling_days if cooling_days is not None else [14, 365, 3650, 36500]
+    dose_at_cooling_times: Dict[int, float] = {}
+
+    for days_after in sorted(requested_days):
         target_s = days_after * 24 * 3600
         # first index in cool_times >= target_s
         rel_idx = np.searchsorted(cool_times, target_s, side='left')

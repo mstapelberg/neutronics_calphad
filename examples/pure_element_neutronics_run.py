@@ -30,7 +30,7 @@ RESULTS_DIR = os.path.join("analysis_results", "pure_element_neutronics_run")
 
 # Neutronics limits
 CRIT_LIMITS = {"He_appm": 1172.2/2, "H_appm": 1200}
-DOSE_LIMITS = {14: 1e4, 365: 1, 3650: 1e-2, 36500: 1e-4}
+DOSE_LIMITS = {30: 1e3, 365: 1, 5*365: 1e-2, 36500: 1e-4}
 
 def calculate_max_compositions(results_dict: Dict[str, Dict[str, Any]], 
                              crit_limits: Dict[str, float], 
@@ -78,46 +78,75 @@ def calculate_max_compositions(results_dict: Dict[str, Dict[str, Any]],
         
         # Check gas production limits
         for gas_type, limit in crit_limits.items():
-            if (gas_type in v_results.get('gas_production', {}) and 
-                gas_type in element_results.get('gas_production', {})):
-                
-                v_gas = v_results['gas_production'][gas_type]
-                x_gas = element_results['gas_production'][gas_type]
-                
-                # Calculate maximum X fraction for this gas type
-                if x_gas != v_gas:  # Avoid division by zero
-                    gas_fraction = (limit - v_gas) / (x_gas - v_gas)
-                    # Ensure fraction is between 0 and 1
-                    gas_fraction = max(0.0, min(1.0, gas_fraction))
-                    max_gas_fraction = min(max_gas_fraction, gas_fraction)
-                else:
-                    # Same gas production as V, no additional constraint
-                    pass
-            else:
+            v_gas = v_results.get('gas_production', {}).get(gas_type)
+            x_gas = element_results.get('gas_production', {}).get(gas_type)
+            if v_gas is None or x_gas is None:
                 print(f"Warning: Missing {gas_type} data for V or {element}")
+                continue
+
+            diff = x_gas - v_gas
+            eps = 1e-15
+            if abs(diff) < eps:
+                # Same property as V
+                if v_gas > limit:
+                    # V already violates → no feasible fraction; upper bound 0
+                    max_gas_fraction = 0.0
+                # else no constraint
+            elif diff > 0:
+                # X worsens property → true upper bound
+                f_upper = (limit - v_gas) / diff
+                f_upper = max(0.0, min(1.0, f_upper))
+                max_gas_fraction = min(max_gas_fraction, f_upper)
+            else:
+                # X improves property (diff < 0)
+                if v_gas > limit:
+                    # This creates a lower bound, but does not reduce the maximum
+                    # So the upper bound remains unchanged (1.0)
+                    pass
         
         # Check dose rate limits
         for cooling_time, limit in dose_limits.items():
-            if (cooling_time in v_results.get('dose_at_cooling_times', {}) and 
-                cooling_time in element_results.get('dose_at_cooling_times', {})):
-                
-                v_dose = v_results['dose_at_cooling_times'][cooling_time]
-                x_dose = element_results['dose_at_cooling_times'][cooling_time]
-                
-                # Calculate maximum X fraction for this dose rate
-                if x_dose != v_dose:  # Avoid division by zero
-                    dose_fraction = (limit - v_dose) / (x_dose - v_dose)
-                    # Ensure fraction is between 0 and 1
-                    dose_fraction = max(0.0, min(1.0, dose_fraction))
-                    max_dose_fraction = min(max_dose_fraction, dose_fraction)
-                else:
-                    # Same dose rate as V, no additional constraint
-                    pass
-            else:
+            v_dose = v_results.get('dose_at_cooling_times', {}).get(cooling_time)
+            x_dose = element_results.get('dose_at_cooling_times', {}).get(cooling_time)
+            if v_dose is None or x_dose is None:
                 print(f"Warning: Missing dose data for {cooling_time} days for V or {element}")
+                continue
+
+            diff = x_dose - v_dose
+            eps = 1e-15
+            if abs(diff) < eps:
+                if v_dose > limit:
+                    max_dose_fraction = 0.0
+            elif diff > 0:
+                f_upper = (limit - v_dose) / diff
+                f_upper = max(0.0, min(1.0, f_upper))
+                max_dose_fraction = min(max_dose_fraction, f_upper)
+            else:
+                if v_dose > limit:
+                    # Lower bound; upper bound unchanged
+                    pass
         
+        # Fallback: if calculation yielded an overly restrictive zero but the
+        # pure element X itself satisfies all limits, allow up to the cap
+        # (this protects against numerical/logic edge cases).
+        x_satisfies_gas = True
+        for gas_type, limit in crit_limits.items():
+            x_val = element_results.get('gas_production', {}).get(gas_type)
+            if x_val is None or x_val > limit:
+                x_satisfies_gas = False
+                break
+
+        x_satisfies_dose = True
+        for cooling_time, limit in dose_limits.items():
+            x_val = element_results.get('dose_at_cooling_times', {}).get(cooling_time)
+            if x_val is None or x_val > limit:
+                x_satisfies_dose = False
+                break
+
         # Take the more restrictive limit
         max_fraction = min(max_gas_fraction, max_dose_fraction)
+        if max_fraction == 0.0 and x_satisfies_gas and x_satisfies_dose:
+            max_fraction = 0.95
         
         # Ensure we don't exceed 0.95 (leaving at least 5% for V)
         max_fraction = min(max_fraction, 0.95)
@@ -174,7 +203,7 @@ def read_depletion_results(results_dir: str, material_name: str) -> Dict[str, An
     try:
         # Get activity data by nuclide
         material_id = list(results[0].index_mat.keys())[0]
-        times_activity, activity_by_nuclide = results.get_activity(material_id, units="Bq", by_nuclide=True)
+        times_activity, activity_by_nuclide = results.get_activity(material_id, units="Bq/kg", by_nuclide=True)
 
         # Get total dose rates (not by nuclide)
         try:
@@ -430,6 +459,10 @@ def analyze_gas_production_reactions(results_dict: Dict[str, Dict[str, Any]],
     print("\n" + "="*60)
     print("GAS PRODUCTION REACTION ANALYSIS")
     print("="*60)
+
+    # Ensure output directory exists for reaction dumps
+    reactions_outdir = os.path.join(results_dir, 'analysis_plots', 'reactions')
+    os.makedirs(reactions_outdir, exist_ok=True)
     
     # Load the depletion chain to understand reactions
     chain = openmc.deplete.Chain.from_xml(openmc.config['chain_file'])
@@ -454,31 +487,323 @@ def analyze_gas_production_reactions(results_dict: Dict[str, Dict[str, Any]],
             
             print(f"  Gas production: {gas_production}")
             
-            # Analyze reactions that produce He4 and H1
+            # Determine which nuclides are present during irradiation steps
+            try:
+                results_path = os.path.join(results_dir, 'depletion_results', material_name, 'depletion_results.h5')
+                res_obj = openmc.deplete.Results(results_path)
+                source_rates = res_obj.get_source_rates()
+                irr_indices = np.nonzero(source_rates)[0]
+                if len(irr_indices) == 0:
+                    present_nuclides_irrad: set[str] = set()
+                else:
+                    final_irrad_idx = irr_indices[-1]
+                    material_id = list(res_obj[0].index_mat.keys())[0]
+                    _, act_by_nuc = res_obj.get_activity(material_id, units="Bq/kg", by_nuclide=True)
+                    present_nuclides_irrad = set()
+                    for i in range(min(final_irrad_idx + 1, len(act_by_nuc))):
+                        for nuc, A in act_by_nuc[i].items():
+                            if A > 0:
+                                present_nuclides_irrad.add(nuc)
+            except Exception as inv_err:
+                print(f"  Warning: Failed to get irradiation inventory for {material_name}: {inv_err}")
+                present_nuclides_irrad = set()
+
+            # Analyze reactions that produce H/He directly via reaction target
             he4_producers = []
             h1_producers = []
+            h2_producers = []
+            h3_producers = []
+            he3_producers = []
             
-            # Look through the chain for reactions that produce He4 and H1
-            for nuclide_name, nuclide_data in chain.nuclides.items():
-                for reaction_name, reaction_data in nuclide_data.reactions.items():
-                    # Check if this reaction produces He4
-                    if 'He4' in reaction_data.products:
-                        he4_producers.append({
-                            'parent': nuclide_name,
-                            'reaction': reaction_name,
-                            'products': reaction_data.products
-                        })
-                    
-                    # Check if this reaction produces H1
-                    if 'H1' in reaction_data.products:
-                        h1_producers.append({
-                            'parent': nuclide_name,
-                            'reaction': reaction_name,
-                            'products': reaction_data.products
-                        })
+            # Helper to get a readable name
+            def _obj_name(obj: Any) -> str:
+                for attr in ("name", "nuclide", "label", "id"):
+                    if hasattr(obj, attr):
+                        value = getattr(obj, attr)
+                        return str(value)
+                return str(obj)
+
+            # Look through the chain for reactions that produce gas targets
+            nuclides_obj = getattr(chain, 'nuclides', {})
+            if isinstance(nuclides_obj, dict):
+                nuclide_iter = nuclides_obj.items()
+            elif isinstance(nuclides_obj, list):
+                nuclide_iter = (( _obj_name(n), n) for n in nuclides_obj)
+            else:
+                nuclide_iter = []
+
+            for nuclide_name, nuclide_data in nuclide_iter:
+                # If we have an irradiation inventory, skip nuclides never present
+                if present_nuclides_irrad and nuclide_name not in present_nuclides_irrad:
+                    continue
+                reactions = getattr(nuclide_data, 'reactions', None)
+                if reactions is None:
+                    continue
+
+                if isinstance(reactions, dict):
+                    reaction_iter = reactions.items()
+                elif isinstance(reactions, list):
+                    reaction_iter = (( _obj_name(r), r) for r in reactions)
+                else:
+                    continue
+
+                for reaction_name, reaction_data in reaction_iter:
+                    # Prefer explicit 'target' from the chain
+                    target = getattr(reaction_data, 'target', None)
+                    target_str = _obj_name(target) if target is not None else None
+                    if target_str is None:
+                        # Fallback to product list, normalize to strings
+                        products = getattr(reaction_data, 'products', None)
+                        products_str = [ _obj_name(p) for p in products ] if products else []
+                        # Heuristic: pick exact gas nuclides in products
+                        if 'He4' in products_str:
+                            target_str = 'He4'
+                        elif 'He3' in products_str:
+                            target_str = 'He3'
+                        elif 'H1' in products_str:
+                            target_str = 'H1'
+                        elif 'H2' in products_str:
+                            target_str = 'H2'
+                        elif 'H3' in products_str:
+                            target_str = 'H3'
+                        else:
+                            continue
+
+                    record = {
+                        'parent': nuclide_name,
+                        'reaction': getattr(reaction_data, 'type', reaction_name),
+                        'target': target_str,
+                    }
+                    if target_str == 'He4':
+                        he4_producers.append(record)
+                    elif target_str == 'He3':
+                        he3_producers.append(record)
+                    elif target_str == 'H1':
+                        h1_producers.append(record)
+                    elif target_str == 'H2':
+                        h2_producers.append(record)
+                    elif target_str == 'H3':
+                        h3_producers.append(record)
             
             print(f"  Found {len(he4_producers)} He4-producing reactions in chain")
+            print(f"  Found {len(he3_producers)} He3-producing reactions in chain")
             print(f"  Found {len(h1_producers)} H1-producing reactions in chain")
+            print(f"  Found {len(h2_producers)} H2-producing reactions in chain")
+            print(f"  Found {len(h3_producers)} H3-producing reactions in chain")
+
+            # Depth-limited reachability search to include indirect production via chains/decay
+            def enumerate_targets(nuc: str, max_depth: int = 3) -> List[Dict[str, Any]]:
+                gas_set = {"H1", "H2", "H3", "He3", "He4"}
+                paths: List[Dict[str, Any]] = []
+                from collections import deque
+                queue = deque()
+                # path is a list of edges: {from, reaction, to}
+                queue.append((nuc, [], 0))
+                visited = {nuc: 0}
+
+                while queue:
+                    current, path, depth = queue.popleft()
+                    if depth >= max_depth:
+                        continue
+                    # get nuclide node
+                    node = None
+                    if isinstance(nuclides_obj, dict):
+                        node = nuclides_obj.get(current)
+                    else:
+                        # best-effort search by name
+                        for name, data in nuclide_iter:
+                            if name == current:
+                                node = data
+                                break
+                    if node is None:
+                        continue
+
+                    # collect outgoing edges from reactions
+                    edges = []
+                    reactions = getattr(node, 'reactions', None)
+                    if reactions is not None:
+                        if isinstance(reactions, dict):
+                            iterable = reactions.items()
+                        elif isinstance(reactions, list):
+                            iterable = (( _obj_name(r), r) for r in reactions)
+                        else:
+                            iterable = []
+                        for rxn_name, rxn in iterable:
+                            t = getattr(rxn, 'target', None)
+                            t_name = _obj_name(t) if t is not None else None
+                            if t_name is None:
+                                products = getattr(rxn, 'products', None)
+                                prod_names = [ _obj_name(p) for p in products ] if products else []
+                                for candidate in prod_names:
+                                    # record edges for gas or first product only
+                                    edges.append((candidate, getattr(rxn, 'type', rxn_name)))
+                            else:
+                                edges.append((t_name, getattr(rxn, 'type', rxn_name)))
+
+                    # include decay edges if present
+                    decay_modes = getattr(node, 'decay_modes', None)
+                    if decay_modes:
+                        for dm in decay_modes:
+                            t = getattr(dm, 'target', None)
+                            t_name = _obj_name(t) if t is not None else None
+                            if t_name:
+                                edges.append((t_name, getattr(dm, 'type', 'decay')))
+
+                    for t_name, rxn_type in edges:
+                        edge = { 'from': current, 'reaction': rxn_type, 'to': t_name }
+                        new_path = path + [edge]
+                        if t_name in gas_set:
+                            paths.append({ 'path': new_path })
+                        else:
+                            nd = depth + 1
+                            prev = visited.get(t_name)
+                            if prev is None or nd < prev:
+                                visited[t_name] = nd
+                                queue.append((t_name, new_path, nd))
+                return paths
+
+            indirect_paths: Dict[str, List[Dict[str, Any]]] = {}
+            for start in sorted(present_nuclides_irrad):
+                indirect_paths[start] = enumerate_targets(start, max_depth=3)
+
+            # Persist results for inspection
+            out_he4_json = os.path.join(reactions_outdir, f"{material_name}_he4_reactions.json")
+            out_he3_json = os.path.join(reactions_outdir, f"{material_name}_he3_reactions.json")
+            out_h1_json = os.path.join(reactions_outdir, f"{material_name}_h1_reactions.json")
+            out_h2_json = os.path.join(reactions_outdir, f"{material_name}_h2_reactions.json")
+            out_h3_json = os.path.join(reactions_outdir, f"{material_name}_h3_reactions.json")
+            out_summary_txt = os.path.join(reactions_outdir, f"{material_name}_reactions_summary.txt")
+            out_paths_json = os.path.join(reactions_outdir, f"{material_name}_gas_paths.json")
+
+            try:
+                with open(out_he4_json, 'w') as f:
+                    json.dump({
+                        'material': material_name,
+                        'count': len(he4_producers),
+                        'reactions': he4_producers,
+                    }, f, indent=2)
+                with open(out_he3_json, 'w') as f:
+                    json.dump({
+                        'material': material_name,
+                        'count': len(he3_producers),
+                        'reactions': he3_producers,
+                    }, f, indent=2)
+                with open(out_h1_json, 'w') as f:
+                    json.dump({
+                        'material': material_name,
+                        'count': len(h1_producers),
+                        'reactions': h1_producers,
+                    }, f, indent=2)
+                with open(out_h2_json, 'w') as f:
+                    json.dump({
+                        'material': material_name,
+                        'count': len(h2_producers),
+                        'reactions': h2_producers,
+                    }, f, indent=2)
+                with open(out_h3_json, 'w') as f:
+                    json.dump({
+                        'material': material_name,
+                        'count': len(h3_producers),
+                        'reactions': h3_producers,
+                    }, f, indent=2)
+                with open(out_paths_json, 'w') as f:
+                    json.dump({
+                        'material': material_name,
+                        'paths': indirect_paths,
+                    }, f, indent=2)
+
+                with open(out_summary_txt, 'w') as f:
+                    f.write(f"Material: {material_name}\n")
+                    f.write(f"He4-producing reactions: {len(he4_producers)}\n")
+                    f.write(f"He3-producing reactions: {len(he3_producers)}\n")
+                    f.write(f"H1-producing reactions: {len(h1_producers)}\n")
+                    f.write(f"H2-producing reactions: {len(h2_producers)}\n")
+                    f.write(f"H3-producing reactions: {len(h3_producers)}\n\n")
+                    if he4_producers:
+                        f.write("Example He4-producing reactions (up to 10):\n")
+                        for r in he4_producers[:10]:
+                            f.write(f"  {r['parent']}({r['reaction']}) -> {r['target']}\n")
+                        f.write("\n")
+                    for label, coll in (("He3", he3_producers), ("H1", h1_producers), ("H2", h2_producers), ("H3", h3_producers)):
+                        if coll:
+                            f.write(f"Example {label}-producing reactions (up to 10):\n")
+                            for r in coll[:10]:
+                                f.write(f"  {r['parent']}({r['reaction']}) -> {r['target']}\n")
+                            f.write("\n")
+
+                print(f"  - Reactions written: {out_he4_json}, {out_he3_json}, {out_h1_json}, {out_h2_json}, {out_h3_json}, {out_paths_json}, {out_summary_txt}")
+
+                # --- Contribution scoring (atoms·s exposure proxy) ---
+                try:
+                    res_obj = openmc.deplete.Results(os.path.join(results_dir, 'depletion_results', material_name, 'depletion_results.h5'))
+                    times_s = res_obj.get_times()
+                    source_rates = res_obj.get_source_rates()
+                    irr_idx = np.nonzero(source_rates)[0]
+                    if len(irr_idx) > 0:
+                        final_irrad_idx = irr_idx[-1]
+                    else:
+                        final_irrad_idx = -1
+
+                    # dt for irradiation steps only
+                    dt = np.diff(times_s[:final_irrad_idx+2]) if final_irrad_idx >= 0 else np.array([])
+
+                    # atoms cache per nuclide
+                    material_id = list(res_obj[0].index_mat.keys())[0]
+                    atoms_cache: Dict[str, np.ndarray] = {}
+                    def get_atoms_series(nuc: str) -> np.ndarray:
+                        if nuc in atoms_cache:
+                            return atoms_cache[nuc]
+                        try:
+                            _, arr = res_obj.get_atoms(material_id, nuc)
+                            atoms_cache[nuc] = arr
+                            return arr
+                        except Exception:
+                            atoms_cache[nuc] = np.zeros_like(times_s)
+                            return atoms_cache[nuc]
+
+                    GAS_SET = {"H1", "H2", "H3", "He3", "He4"}
+                    contrib_rows: List[Dict[str, Any]] = []
+
+                    # Collect direct reactions discovered above
+                    direct_maps = [
+                        ("He4", he4_producers),
+                        ("He3", he3_producers),
+                        ("H1", h1_producers),
+                        ("H2", h2_producers),
+                        ("H3", h3_producers),
+                    ]
+                    for gas_label, coll in direct_maps:
+                        for r in coll:
+                            parent = r['parent']
+                            rxn_type = r['reaction']
+                            series = get_atoms_series(parent)
+                            if final_irrad_idx >= 0 and len(series) >= final_irrad_idx+1 and len(dt) == final_irrad_idx+1:
+                                exposure = float(np.dot(series[:final_irrad_idx+1], dt))
+                            else:
+                                exposure = float(np.sum(series))
+                            contrib_rows.append({
+                                'gas': gas_label,
+                                'parent': parent,
+                                'reaction_type': rxn_type,
+                                'exposure_atoms_s': exposure,
+                            })
+
+                    # Persist contribution ranking
+                    contrib_df = pd.DataFrame(contrib_rows)
+                    contrib_out_csv = os.path.join(reactions_outdir, f"{material_name}_gas_contributors.csv")
+                    contrib_out_json = os.path.join(reactions_outdir, f"{material_name}_gas_contributors.json")
+                    if not contrib_df.empty:
+                        contrib_df.sort_values(['gas', 'exposure_atoms_s'], ascending=[True, False], inplace=True)
+                        contrib_df.to_csv(contrib_out_csv, index=False)
+                        with open(contrib_out_json, 'w') as f:
+                            json.dump(contrib_rows, f, indent=2)
+                        print(f"  - Contribution tables written: {contrib_out_csv}, {contrib_out_json}")
+                    else:
+                        print("  - No direct gas contributions found to rank.")
+                except Exception as contrib_err:
+                    print(f"  Warning: Failed to compute contribution ranking for {material_name}: {contrib_err}")
+            except Exception as write_err:
+                print(f"  Warning: Failed to write reaction files for {material_name}: {write_err}")
             
             # Show top reactions (this is qualitative since we don't have reaction rates)
             if he4_producers:
@@ -550,13 +875,15 @@ def setup_openmc_model():
     FUSION_POWER_MEV = 17.6
     MEV_TO_J = 1.602176634e-13
     SOURCE_RATE = POWER_MW * 1e6 / (FUSION_POWER_MEV * MEV_TO_J)  * TORUS_TO_SPHERE_VOLUME_RATIO
-    cooling_times = ['1 second', '1 minute', '1 hour', '10 hours', '1 day', '1 week', '2 weeks', '1 year', '2 years', '5 years', '10 years', '25 years', '100 years']
+    print(f"PRE VOLUME CORRECTION SOURCE RATE = {SOURCE_RATE/TORUS_TO_SPHERE_VOLUME_RATIO} n/s\n")
+    print(f"POST VOLUME CORRECTION SOURCE RATE = {SOURCE_RATE} n/s")
+    cooling_times = ['1 second', '1 minute', '1 hour', '10 hours', '1 day', '1 week', '2 weeks', '30 days', '1 year', '2 years', '5 years', '10 years', '25 years', '100 years']
     
     scheduler = TimeScheduler(
-        irradiation_time='1 year',
+        irradiation_time='2 years',
         cooling_times=cooling_times,
         source_rate=SOURCE_RATE,
-        irradiation_steps=12,
+        irradiation_steps=24,
     )
     
     timesteps, sources = scheduler.get_timesteps_and_source_rates()
@@ -581,9 +908,12 @@ for test_material in test_materials:
         # Try to load existing results
         try:
             results = openmc.deplete.Results(results_file)
-            material_score = parse_openmc_results(results=results,
-                                                  chain_file=openmc.config['chain_file'],
-                                                  abs_file='/home/myless/Packages/fispact/nuclear_data/decay/abs_2012')
+            material_score = parse_openmc_results(
+                results=results,
+                chain_file=openmc.config['chain_file'],
+                abs_file='/home/myless/Packages/fispact/nuclear_data/decay/abs_2012',
+                cooling_days=sorted(DOSE_LIMITS.keys()),
+            )
             results_dict[material_name] = material_score
             print(f"Loaded existing results for {material_name}: {material_score}")
             continue
@@ -614,9 +944,12 @@ for test_material in test_materials:
     )
 
     # 7) evaluate the batch of material's dose rates and gas production rates 
-    material_score = parse_openmc_results(results=results,
-                                          chain_file=openmc.config['chain_file'],
-                                          abs_file='/home/myless/Packages/fispact/nuclear_data/decay/abs_2012')
+    material_score = parse_openmc_results(
+        results=results,
+        chain_file=openmc.config['chain_file'],
+        abs_file='/home/myless/Packages/fispact/nuclear_data/decay/abs_2012',
+        cooling_days=sorted(DOSE_LIMITS.keys()),
+    )
     
     results_dict[material_name] = material_score
 
