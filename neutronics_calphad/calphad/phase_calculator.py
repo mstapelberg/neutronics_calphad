@@ -26,21 +26,29 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
-logger = logging.getLogger(__name__)
-
 class CALPHADBatchCalculator:
-    """Batch equilibrium calculator using Thermo-Calc or stub implementation."""
+    """Batch equilibrium calculator using Thermo-Calc or stub implementation.
+
+    Attributes:
+        database: Thermo-Calc database name.
+        temperature: Calculation temperature in K.
+        fixed_impurities: Fixed impurity concentrations (atomic fraction).
+        phase_threshold: Dominant phase fraction threshold (0-1) for `single_phase`.
+    """
     
     def __init__(self, 
-                 database: str = "TCHEA7",
-                 temperature: float = 823.5,
-                 fixed_impurities: Optional[Dict[str, float]] = None):
+                 database: str = "TCHEA8",
+                 temperature: float = 873.15,
+                 fixed_impurities: Optional[Dict[str, float]] = None,
+                 phase_threshold: float = 0.995):
         """Initialize batch calculator.
         
         Args:
-            database: Thermo-Calc database name
-            temperature: Calculation temperature in K
-            fixed_impurities: Fixed impurity concentrations (atomic fraction)
+            database: Thermo-Calc database name.
+            temperature: Calculation temperature in K.
+            fixed_impurities: Fixed impurity concentrations (atomic fraction).
+            phase_threshold: Dominant phase minimum fraction (0-1) to mark as
+                single_phase. Default 0.995 corresponds to 99.5 vol%.
         """
         self.database = database
         self.temperature = temperature
@@ -49,8 +57,9 @@ class CALPHADBatchCalculator:
         self.fixed_impurities = fixed_impurities or {
             'C': 290e-6,  # 290 appm
             'N': 440e-6,  # 440 appm
-            #'O': 470e-6   # 470 appm # TCHEA7 does not have O, but TCHEA8 does 
+            'O': 470e-6   # 470 appm 
         }
+        self.phase_threshold = phase_threshold
         
         if not TC_AVAILABLE:
             logger.warning("Using stub CALPHAD implementation")
@@ -79,7 +88,11 @@ class CALPHADBatchCalculator:
     def _calculate_batch_tc(self, 
                            compositions: np.ndarray,
                            elements: List[str]) -> pd.DataFrame:
-        """Thermo-Calc implementation of batch calculation."""
+        """Thermo-Calc implementation of batch calculation.
+
+        The method determines `single_phase` based on whether the dominant phase
+        fraction meets or exceeds `self.phase_threshold` (fraction units 0-1).
+        """
         results = []
         
         # Add impurity elements
@@ -118,17 +131,18 @@ class CALPHADBatchCalculator:
                     stable_phases = result.get_stable_phases()
                     
                     # Get phase fractions
-                    phase_fractions = {}
+                    phase_fractions: Dict[str, float] = {}
                     for phase in stable_phases:
                         fraction = result.get_value_of(
                             ThermodynamicQuantity.mole_fraction_of_a_phase(phase)
                         )
-                        phase_fractions[phase] = fraction
+                        phase_fractions[phase] = float(fraction)
                         
-                    # Determine dominant phase
-                    dominant_phase = max(phase_fractions, key=phase_fractions.get)
+                    # Determine dominant phase and single_phase by threshold
+                    dominant_phase = max(phase_fractions, key=phase_fractions.get) if phase_fractions else "NONE"
                     phase_count = len(stable_phases)
-                    single_phase = phase_count == 1
+                    dominant_fraction = phase_fractions.get(dominant_phase, 0.0)
+                    single_phase = bool(dominant_fraction >= self.phase_threshold)
                     
                 except Exception as e:
                     logger.warning(f"Calculation failed for composition: {comp}, error: {e}")
@@ -152,27 +166,32 @@ class CALPHADBatchCalculator:
     def _calculate_batch_stub(self, 
                              compositions: np.ndarray,
                              elements: List[str]) -> pd.DataFrame:
-        """Stub implementation for testing without Thermo-Calc."""
+        """Stub implementation for testing without Thermo-Calc.
+
+        Uses a synthetic phase distribution (fraction units 0-1) and the configured
+        `phase_threshold` to determine the `single_phase` flag, emulating the new logic.
+        """
         results = []
         
         for comp in compositions:
-            # Simple heuristic: single phase if largest component > 0.8
+            # Synthetic phase distribution around a dominant BCC_A2 phase
             max_fraction = comp.max()
-            single_phase = max_fraction > 0.8
-            
-            if single_phase:
-                phase_count = 1
-                dominant_phase = "BCC_A2"
+            dominant_phase = "BCC_B2"
+            # Construct fractions in fraction units consistent with threshold 0.995
+            if max_fraction > 0.9:
+                phase_fractions = {dominant_phase: 0.997, "LAVES_C15": 0.001, "B2": 0.002}
             else:
-                phase_count = 2
-                dominant_phase = "BCC_A2"
-                
+                phase_fractions = {dominant_phase: 0.970, "B2": 0.025, "FCC_L12": 0.005}
+            phase_count = len(phase_fractions)
+            dominant_fraction = float(phase_fractions.get(dominant_phase, 0.0))
+            single_phase = bool(dominant_fraction >= self.phase_threshold)
+            
             row = {f'x_{el}': comp[i] for i, el in enumerate(elements)}
             row.update({
                 'phase_count': phase_count,
                 'dominant_phase': dominant_phase,
                 'single_phase': single_phase,
-                'phases': json.dumps({dominant_phase: 0.7, "LAVES": 0.3} if not single_phase else {dominant_phase: 1.0})
+                'phases': json.dumps(phase_fractions)
             })
             results.append(row)
             

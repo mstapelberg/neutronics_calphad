@@ -15,8 +15,8 @@ ELEMENTS_ORDER: Tuple[str, ...] = ("V", "Cr", "Ti", "W", "Zr")
 
 def run_calphad_batch(
     compositions: pd.DataFrame,
-    temperature_k: float = 823.5,
-    database: str = "TCHEA7",
+    temperature_k: float = 873.15,
+    database: str = "TCHEA8",
 ) -> pd.DataFrame:
     """Run CALPHAD batch for given compositions.
 

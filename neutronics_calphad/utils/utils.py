@@ -392,13 +392,30 @@ def suppress_openmc_warnings():
             self.stderr_buffer = io.StringIO()
         
         def write(self, text: str) -> None:
+            # Suppress lines that start with ENDF/GNDS-like neutron file ids (e.g., n-006_...)
+            stripped = text.lstrip()
+            if stripped.startswith('n-00'):
+                return
             # Check if the text contains any warning patterns
             if any(pattern in text for pattern in self.patterns):
                 return  # Suppress the warning
-            self.original_stdout.write(text)
+            # Write to the appropriate original stream based on availability
+            try:
+                self.original_stdout.write(text)
+            except Exception:
+                try:
+                    self.original_stderr.write(text)
+                except Exception:
+                    pass
         
         def flush(self) -> None:
-            self.original_stdout.flush()
+            try:
+                self.original_stdout.flush()
+            except Exception:
+                try:
+                    self.original_stderr.flush()
+                except Exception:
+                    pass
     
     # Create filter instances
     stdout_filter = WarningFilter(warning_patterns)
@@ -427,4 +444,85 @@ def run_with_warning_suppression(func, *args, **kwargs):
         The result of calling func(*args, **kwargs)
     """
     with suppress_openmc_warnings():
-        return func(*args, **kwargs) 
+        return func(*args, **kwargs)
+
+# --- Strict suppression utilities ---
+import os as _os  # keep alias local to avoid shadowing
+
+class _GlobalStreamFilter:
+    """Global stdout/stderr filter to drop noisy OpenMC lines.
+    
+    Drops lines that:
+    - start with 'n-00' after leading whitespace (ENDF/GNDS neutron file ids)
+    - contain known noisy substrings (e.g., LTT(3) elastic scattering)
+    """
+    def __init__(self, patterns: Optional[List[str]] = None, prefixes: Optional[List[str]] = None):
+        self._out = sys.stdout
+        self._err = sys.stderr
+        self._patterns = patterns or [
+            "LTT (3) for elastic scattering, using Legendre only",
+            "LTT(3) for elastic scattering, using Legendre only",
+            "GNDS naming convention",
+        ]
+        self._prefixes = prefixes or ["n-00"]
+    
+    def write(self, text: str) -> None:
+        stripped = text.lstrip()
+        if any(stripped.startswith(p) for p in self._prefixes):
+            return
+        if any(p in text for p in self._patterns):
+            return
+        try:
+            self._out.write(text)
+        except Exception:
+            try:
+                self._err.write(text)
+            except Exception:
+                pass
+    
+    def flush(self) -> None:
+        try:
+            self._out.flush()
+        except Exception:
+            try:
+                self._err.flush()
+            except Exception:
+                pass
+
+
+def install_global_output_filter(patterns: Optional[List[str]] = None, suppress_prefixes: Optional[List[str]] = None) -> None:
+    """Install a global filter on sys.stdout/sys.stderr for noisy OpenMC lines.
+    
+    Call this once at process startup (before importing heavy libs if possible).
+    """
+    sys.stdout = _GlobalStreamFilter(patterns, suppress_prefixes)
+    sys.stderr = sys.stdout
+
+
+@contextlib.contextmanager
+def silence_stderr_fd() -> Any:
+    """Temporarily redirect OS-level stderr (fd=2) to /dev/null.
+    
+    Use to suppress C/C++ writes that bypass Python streams.
+    """
+    devnull_fd = _os.open(_os.devnull, _os.O_WRONLY)
+    saved_fd = _os.dup(2)
+    try:
+        _os.dup2(devnull_fd, 2)
+        yield
+    finally:
+        try:
+            _os.dup2(saved_fd, 2)
+        finally:
+            _os.close(saved_fd)
+            _os.close(devnull_fd)
+
+
+def permanently_redirect_stderr_to_null() -> None:
+    """Permanently redirect OS-level stderr (fd=2) to /dev/null for this process.
+    
+    WARNING: This hides all native-library warnings and errors written to stderr.
+    """
+    devnull_fd = _os.open(_os.devnull, _os.O_WRONLY)
+    _os.dup2(devnull_fd, 2)
+    # Intentionally not closing devnull_fd to keep redirection valid 

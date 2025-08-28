@@ -53,7 +53,7 @@ def run_independent_depletion(model: openmc.Model,
         micros=[microxs],      # List of MicroXS objects (one per material domain)
         chain_file=str(chain_file),
         normalization_mode='source-rate',
-        reduce_chain_level=8             # More aggressive chain reduction to avoid small concentrations
+        reduce_chain_level=5             # More aggressive chain reduction to avoid small concentrations
     )
     
     
@@ -74,7 +74,7 @@ def run_independent_depletion(model: openmc.Model,
         'method': 'BDF'      # Backward differentiation formula for stiff problems
     }
     
-    print("Running depletion with enhanced numerical stability settings...")
+    print("Running depletion with conservative numerical stability settings...")
     integrator.integrate(path=str(os.path.join(outdir, "depletion_results.h5")))
     
     return openmc.deplete.Results(os.path.join(outdir, "depletion_results.h5"))
