@@ -55,6 +55,63 @@ def setup_openmc_paths(config: Dict[str, Any]) -> None:
     os.environ.setdefault('OPENMC_QUIET', '1')
 
 
+def _round_composition_for_output(
+    composition: Dict[str, float],
+    alloy_decimals: int = 3,
+    impurity_decimals: int = 6,
+    v_decimals: int = 6,
+) -> Dict[str, float]:
+    """Round composition values for stable JSON output.
+
+    Cr, Ti, W, Zr are rounded to ``alloy_decimals`` and impurities
+    (C, N, O) to ``impurity_decimals``. V is set as the balance after
+    rounding others and then rounded to ``v_decimals``. A final small
+    correction is applied to V to enforce closure within rounding.
+
+    Args:
+        composition: Element-to-fraction mapping (sums to ≈ 1.0).
+        alloy_decimals: Decimal places for Cr, Ti, W, Zr.
+        impurity_decimals: Decimal places for C, N, O.
+        v_decimals: Decimal places for V.
+
+    Returns:
+        Rounded composition dict that sums to 1.0 within rounding.
+    """
+    alloy_keys = {"Cr", "Ti", "W", "Zr"}
+    impurity_keys = {"C", "N", "O"}
+
+    rounded: Dict[str, float] = {}
+
+    # Round all elements except V first
+    for elem, frac in composition.items():
+        if elem == "V":
+            continue
+        try:
+            val = float(frac)
+        except Exception:
+            continue
+        if elem in alloy_keys:
+            rounded[elem] = round(val, alloy_decimals)
+        elif elem in impurity_keys:
+            rounded[elem] = round(val, impurity_decimals)
+        else:
+            # Default rounding for any other trace species
+            rounded[elem] = round(val, impurity_decimals)
+
+    # Compute V as balance and round
+    others_sum = sum(rounded.values())
+    v_balance = max(0.0, 1.0 - others_sum)
+    rounded["V"] = round(v_balance, v_decimals)
+
+    # Final correction to enforce exact closure within rounding resolution
+    total = sum(rounded.values())
+    if abs(total - 1.0) > 1e-12:
+        delta = 1.0 - total
+        rounded["V"] = round(rounded["V"] + delta, v_decimals)
+
+    return rounded
+
+
 def run_single_depletion(
     composition: Dict[str, float],
     output_dir: Path,
@@ -122,6 +179,8 @@ def run_single_depletion(
     model = create_model(config=config.get('geometry_config', SPHERICAL))
     model.settings.particles = config.get('particles', 10000)
     
+    # Round composition for stability and ensure V is exact balance BEFORE creating material
+    composition = _round_composition_for_output(composition)
     # Create material
     mat_name = f"comp_{output_dir.name}"
     material = create_material(composition, mat_name)
@@ -225,7 +284,7 @@ def run_single_depletion(
         pass
     
     return {
-        'composition': composition,
+        'composition': _round_composition_for_output(composition),
         'gas_production': parsed.get('gas_production', {}),
         'dose_at_cooling_times': parsed.get('dose_at_cooling_times', {}),
         'output_dir': str(output_dir)

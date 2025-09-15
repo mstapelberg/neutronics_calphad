@@ -337,6 +337,81 @@ def validate_config(config: Dict[str, Any]) -> Dict[str, Any]:
     
     return validation 
 
+# neutronics_calphad/utils/openmc_noise.py
+import os, sys, re, threading, atexit
+
+def install_endf_stderr_filter(
+    patterns=None,
+    suppress_prefixes=("n-00",),   # ENDF/GNDS file-id prefix like n-001_...
+):
+    """
+    Install a process-wide fd=2 (stderr) filter that drops noisy ENDF/OpenMC lines.
+    Safe to call multiple times; does nothing if already installed.
+    """
+    if getattr(sys, "_endf_stderr_filter_installed", False):
+        return
+    sys._endf_stderr_filter_installed = True
+
+    # Compile patterns
+    if patterns is None:
+        patterns = [
+            r"LTT\s*\(?3\)?\s*for elastic scattering.*Legendre only",
+            r"GNDS naming convention",
+            r"cross_sections",  # keep your old patterns if you wish
+        ]
+    regexes = [re.compile(p) for p in patterns]
+    prefixes = tuple(suppress_prefixes or ())
+
+    # Save original fd=2 and create a pipe
+    orig_fd2 = os.dup(2)   # duplicate current stderr
+    r_fd, w_fd = os.pipe()
+
+    # Redirect fd=2 to the write end of the pipe
+    os.dup2(w_fd, 2)
+    os.close(w_fd)  # fd=2 now points at the pipe; safe to close extra handle
+
+    # Open a text wrapper for the original stderr (line-buffered)
+    orig_stderr = os.fdopen(orig_fd2, "w", buffering=1, encoding="utf-8", errors="replace")
+
+    def _pump():
+        # Read from pipe, forward non-matching lines to original stderr
+        with os.fdopen(r_fd, "rb", closefd=True) as rf:
+            buf = b""
+            while True:
+                chunk = rf.read(1024)
+                if not chunk:
+                    # write end closed (process exiting / restored)
+                    break
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    try:
+                        s = line.decode("utf-8", "ignore")
+                    except Exception:
+                        s = repr(line)
+                    s_stripped = s.lstrip()
+                    drop = s_stripped.startswith(prefixes) or any(r.search(s) for r in regexes)
+                    if not drop:
+                        orig_stderr.write(s + "\n")
+
+    t = threading.Thread(name="endf-stderr-filter", target=_pump, daemon=True)
+    t.start()
+
+    def _restore():
+        try:
+            orig_stderr.flush()
+        finally:
+            try:
+                # Restore the original fd=2 so any teardown errors are visible
+                os.dup2(orig_fd2, 2)
+            finally:
+                try:
+                    orig_stderr.close()
+                except Exception:
+                    pass
+
+    atexit.register(_restore)
+
 
 def filter_openmc_warnings() -> None:
     """Filter common OpenMC warnings that are not critical for analysis.
@@ -526,3 +601,32 @@ def permanently_redirect_stderr_to_null() -> None:
     devnull_fd = _os.open(_os.devnull, _os.O_WRONLY)
     _os.dup2(devnull_fd, 2)
     # Intentionally not closing devnull_fd to keep redirection valid 
+
+
+@contextlib.contextmanager
+def silence_stdout_fd() -> Any:
+    """Temporarily redirect OS-level stdout (fd=1) to /dev/null.
+    
+    Use to suppress native-library prints that bypass Python streams.
+    """
+    devnull_fd = _os.open(_os.devnull, _os.O_WRONLY)
+    saved_fd = _os.dup(1)
+    try:
+        _os.dup2(devnull_fd, 1)
+        yield
+    finally:
+        try:
+            _os.dup2(saved_fd, 1)
+        finally:
+            _os.close(saved_fd)
+            _os.close(devnull_fd)
+
+
+def permanently_redirect_stdout_to_null() -> None:
+    """Permanently redirect OS-level stdout (fd=1) to /dev/null for this process.
+    
+    WARNING: This hides all native-library prints written to stdout.
+    """
+    devnull_fd = _os.open(_os.devnull, _os.O_WRONLY)
+    _os.dup2(devnull_fd, 1)
+    # Intentionally not closing devnull_fd to keep redirection valid

@@ -14,6 +14,24 @@ Main API is exposed from the following submodules:
 
 __version__ = "0.1.0"
 
+# __init__.py
+try:
+    import os as _os
+    if _os.environ.get("NC_SUPPRESS_OPENMC_WARNINGS", "1") == "1":
+        # Install the robust fd-level stderr filter
+        from .utils.openmc_noise import install_endf_stderr_filter as _install_endf_filter
+        _install_endf_filter(
+            patterns=[
+                r"LTT\s*\(?3\)?\s*for elastic scattering.*Legendre only",
+                r"GNDS naming convention",
+                r"cross_sections",
+            ],
+            suppress_prefixes=["n-00"],
+        )
+except Exception:
+    pass  # never fail import on noise suppression
+
+
 # --- Neutronics core API ---
 from .neutronics.geometry_maker import create_model, plot_model
 from .neutronics.library import run_element, build_library

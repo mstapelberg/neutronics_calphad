@@ -9,6 +9,7 @@ Starter kit: ILR transform + LightGBM (quantile) + BoTorch acquisition for V–C
 
 from __future__ import annotations
 import math
+import os
 import numpy as np
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional, Callable
@@ -34,7 +35,7 @@ from gpytorch.mlls.sum_marginal_log_likelihood import SumMarginalLogLikelihood
 CNO_FRAC: float = 0.00  # <-- put your fixed impurity at. frac here (e.g., 0.005). 0 if negligible.
 
 # Dose times (days) – prefer days throughout the workflow for clarity
-DOSE_TIMES_D: List[float] = [1.0, 30.0, 365.0, 5 * 365.0]
+DOSE_TIMES_D: List[float] = [30.0, 365.0, 5 * 365.0, 100 * 365.0]
 # Also expose hours for internal adapters that still expect hours
 DOSE_TIMES_H: List[float] = [24.0 * d for d in DOSE_TIMES_D]
 
@@ -44,9 +45,12 @@ M = len(TARGET_NAMES)
 
 # Limits keyed by TARGET_NAMES
 LIMITS: Dict[str, float] = {
-    **{f"dose_d{int(d)}": 1.0 for d in DOSE_TIMES_D},
-    "He_2y": 5.0e-3,
-    "H_2y": 5.0e-3,
+    "dose_d30": 1e3,
+    "dose_d365": 1.0,
+    "dose_d1825": 1e-2,
+    "dose_d36500": 1e-4,
+    "He_2y": 586.0,
+    "H_2y": 1200.0,
 }
 
 # LightGBM quantiles to train
@@ -54,6 +58,14 @@ QUANTILES = [0.1, 0.5, 0.9]
 
 # Numerical safety
 EPS = 1e-12
+# Optional grid step for alloying elements [Cr, Ti, W, Zr]; set via env LGBM_GRID_STEP
+try:
+    _GRID_STEP_ENV = os.environ.get("LGBM_GRID_STEP", "")
+    GRID_STEP: Optional[float] = float(_GRID_STEP_ENV) if _GRID_STEP_ENV else 0.001
+    if GRID_STEP is not None and GRID_STEP <= 0:
+        GRID_STEP = None
+except Exception:
+    GRID_STEP = None
 
 # =============================================================================
 # 1) ILR utilities (Helmert basis) for 5-part compositions
@@ -157,6 +169,56 @@ def sample_feasible_raw(n: int, rng: np.random.Generator) -> np.ndarray:
         # Clip within individual caps (they already are ≤ S ≤ 0.20)
         X[i] = [min(cr, 0.20), min(ti, 0.20), min(w, 0.20), zr]
     return X  # shape (n,4)
+
+def _quantize_raw_floor(X: np.ndarray, step: Optional[float]) -> np.ndarray:
+    """Quantize raw variables [Cr, Ti, W, Zr] to a floor grid of given step.
+
+    This preserves feasibility because values only decrease:
+    - Per-element bounds remain satisfied
+    - Sum constraint Cr+Ti+W+Zr ≤ 0.20 remains satisfied
+
+    Args:
+        X: Array of shape (n,4) for [Cr, Ti, W, Zr].
+        step: Grid step (e.g., 0.001). If None, returns X unchanged.
+
+    Returns:
+        Quantized array of shape (n,4).
+    """
+    if step is None:
+        return X
+    s = float(step)
+    if not np.isfinite(s) or s <= 0:
+        return X
+    Xq = np.floor(np.asarray(X, dtype=float) / s) * s
+    # Clamp within explicit caps for safety
+    Xq[:, 0] = np.clip(Xq[:, 0], 0.0, 0.20)  # Cr
+    Xq[:, 1] = np.clip(Xq[:, 1], 0.0, 0.20)  # Ti
+    Xq[:, 2] = np.clip(Xq[:, 2], 0.0, 0.20)  # W
+    Xq[:, 3] = np.clip(Xq[:, 3], 0.0, 0.049) # Zr
+    # Sum constraint is still satisfied due to floor, but clip for numerical safety
+    sums = Xq.sum(axis=1)
+    over = sums > 0.20 + 1e-12
+    if np.any(over):
+        # Project by decrementing largest of {Cr,Ti,W} first in step units
+        for i in np.where(over)[0]:
+            excess = sums[i] - 0.20
+            if excess <= 0:
+                continue
+            # Work in integer grid units to avoid drift
+            units = int(np.ceil(excess / s))
+            # Indices for Cr,Ti,W only for removal priority
+            order = np.argsort(-Xq[i, :3])  # descending among first 3
+            j = 0
+            while units > 0 and (Xq[i, :3] > 0).any():
+                col = int(order[j % 3])
+                take = min(units, int(np.floor(Xq[i, col] / s)))
+                if take <= 0:
+                    j += 1
+                    continue
+                Xq[i, col] -= take * s
+                units -= take
+                j += 1
+    return Xq
 
 # =============================================================================
 # 4) LightGBM quantile models (per target, log-space)
@@ -382,7 +444,7 @@ def run_simulator(X_raw: np.ndarray) -> np.ndarray:
     return _run_simulator(
         X_raw=X_raw,
         dose_times_h=DOSE_TIMES_H,
-        threads_per_process=4  # Use 4 threads per depletion based on benchmarks
+        threads_per_process=os.environ.get("OMP_NUM_THREADS", 4)  # Use 4 threads per depletion based on benchmarks
     )
 
 def train_lightgbm_quantiles(X_ilr: np.ndarray, Y_nat: np.ndarray) -> LGBMQuantileEnsemble:
@@ -406,6 +468,17 @@ def active_loop(
     use_fast_pool: bool = True,
     pool_size: int = 8192,
     iter_offset: int = 0,
+    # Exploration controls (mirrors CALPHAD loop)
+    weight_mode: str = "adaptive",
+    w_exploit: float = 0.75,
+    w_boundary: float = 0.25,
+    w_diversity: float = 0.15,
+    diversity_min: float = 0.15,
+    diversity_initial: float = 0.6,
+    diversity_decay_rate: float = 0.2,
+    boundary_early: float = 0.25,
+    boundary_late: float = 0.30,
+    boundary_switch_at_labels: int = 300,
 ) -> Tuple[np.ndarray, np.ndarray, LGBMQuantileEnsemble, ModelListGP]:
     """
     Run active learning loop with optional warm start and iteration offset.
@@ -438,6 +511,8 @@ def active_loop(
         Y_nat = np.asarray(Y0, dtype=float)
     else:
         X_raw = sample_feasible_raw(n_init, rng)        # (n_init, 4)
+        # Quantize alloying elements to grid if configured
+        X_raw = _quantize_raw_floor(X_raw, GRID_STEP)
         Y_nat = run_simulator(X_raw)                    # (n_init, M)
         if on_iteration is not None:
             # iteration 0 = initial design
@@ -452,19 +527,140 @@ def active_loop(
     limit_vec = np.array([LIMITS[name] for name in TARGET_NAMES], dtype=float)
 
     for it in range(n_iters):
-        # Propose a feasible batch maximizing joint PoF
+        # Propose a feasible batch using exploration-aware selection when pool mode is enabled
         import time
         t_start = time.time()
-        X_next = suggest_candidates_joint_pof(
-            gp_model, q=batch_q, limits_nat=limit_vec, 
-            num_restarts=20, raw_samples=512,
-            use_fast_pool=use_fast_pool, pool_size=pool_size
-        )  # (q,4)
+        if use_fast_pool and weight_mode in {"adaptive", "fixed"}:
+            # Build pool via random feasible sampling
+            pool_np = sample_feasible_raw(pool_size, rng)  # (pool_size, 4)
+
+            # Quantize pool BEFORE scoring, enforce per-element minimums, drop duplicates
+            pool_np = _quantize_raw_floor(pool_np, GRID_STEP)
+            min_elem = 0.004
+            mask = (
+                (pool_np[:, 0] >= min_elem) &
+                (pool_np[:, 1] >= min_elem) &
+                (pool_np[:, 2] >= min_elem) &
+                (pool_np[:, 3] >= min_elem)
+            )
+            filtered = pool_np[mask] if mask.size and mask.any() else pool_np
+            # Drop duplicates (round to 6dp for robust keys)
+            seen = set()
+            uniq_rows = []
+            for row in filtered:
+                key = tuple(float(round(x, 6)) for x in row)
+                if key in seen:
+                    continue
+                seen.add(key)
+                uniq_rows.append(row)
+            if uniq_rows and len(uniq_rows) >= batch_q:
+                pool_np = np.asarray(uniq_rows, dtype=float)
+            # Else keep original quantized pool_np to ensure enough candidates
+
+            # Score exploitation via Joint PoF (per-candidate)
+            limits_log10 = np.log10(np.clip(limit_vec, EPS, None))
+            acq = JointPoFAcq(gp_model, limits_log10)
+            dev = next(gp_model.parameters()).device
+            dtype = torch.float64
+            scores = []
+            with torch.no_grad():
+                bs = min(1024, pool_size)
+                for i in range(0, pool_size, bs):
+                    batch = pool_np[i:i+bs]
+                    Xb = torch.tensor(batch, dtype=dtype, device=dev)
+                    score_b = acq(Xb.unsqueeze(1)).squeeze()  # (bs,)
+                    scores.append(score_b)
+            proba = torch.cat(scores).detach().cpu().numpy()  # (pool_size,)
+
+            # Boundary score: prefer joint PoF near 0.5
+            boundary_scores = 1.0 - np.abs(proba - 0.5) * 2.0
+            boundary_scores = np.clip(boundary_scores, 0.0, 1.0)
+
+            # Diversity score: distance from history X_raw
+            def _min_distances(pool_arr: np.ndarray, hist_arr: np.ndarray, chunk: int = 1024) -> np.ndarray:
+                if hist_arr.shape[0] == 0:
+                    # Fallback: distance from centroid of pool
+                    centroid = pool_arr.mean(axis=0, keepdims=True)
+                    return np.linalg.norm(pool_arr - centroid, axis=1)
+                mins = np.empty(pool_arr.shape[0], dtype=float)
+                for j in range(0, pool_arr.shape[0], chunk):
+                    pb = pool_arr[j:j+chunk]
+                    # squared distances to history
+                    d2 = np.sum((pb[:, None, :] - hist_arr[None, :, :]) ** 2, axis=2)
+                    mins[j:j+pb.shape[0]] = np.sqrt(np.min(d2, axis=1))
+                return mins
+
+            min_distances = _min_distances(pool_np, X_raw)
+            # Rank-scale diversity to [0,1]
+            ranks = np.argsort(np.argsort(min_distances))
+            diversity_scores = ranks / (len(min_distances) - 1 + 1e-9)
+
+            # Determine weights
+            if weight_mode == "fixed":
+                w_div_eff = float(max(0.0, min(1.0, w_diversity)))
+                w_bnd_eff = float(max(0.0, min(1.0, w_boundary)))
+                w_exp_eff = float(max(0.0, 1.0 - (w_div_eff + w_bnd_eff)))
+            else:
+                n_labels = X_raw.shape[0]
+                w_div_eff = float(max(diversity_min, diversity_initial * np.exp(-diversity_decay_rate * it)))
+                w_bnd_eff = float(boundary_early if n_labels < boundary_switch_at_labels else boundary_late)
+                w_div_eff = float(max(0.0, min(1.0, w_div_eff)))
+                w_bnd_eff = float(max(0.0, min(1.0, w_bnd_eff)))
+                w_exp_eff = float(max(0.0, 1.0 - (w_div_eff + w_bnd_eff)))
+
+            # Early-iteration diversification if labels scarce
+            early_explore = (it < 2) or (X_raw.shape[0] < 50)
+            if early_explore:
+                select_idx = np.argsort(diversity_scores)[-batch_q:]
+            else:
+                blended_scores = (
+                    w_exp_eff * proba +
+                    w_bnd_eff * boundary_scores +
+                    w_div_eff * diversity_scores
+                )
+                blended_scores = blended_scores + 1e-6 * np.random.random(len(blended_scores))
+
+                # Quotas to ensure representation
+                k_div = int(batch_q * w_div_eff)
+                k_bnd = int(batch_q * w_bnd_eff)
+                k_exp = batch_q - k_div - k_bnd
+
+                idx_div = np.argsort(diversity_scores)[-k_div:] if k_div > 0 else np.array([], dtype=int)
+                mask = np.ones(pool_np.shape[0], dtype=bool)
+                mask[idx_div] = False
+
+                rem_after_div = np.where(mask)[0]
+                idx_bnd_rel = np.argsort(boundary_scores[mask])[-k_bnd:] if k_bnd > 0 else np.array([], dtype=int)
+                idx_bnd = rem_after_div[idx_bnd_rel]
+                mask[idx_bnd] = False
+
+                rem_after_bnd = np.where(mask)[0]
+                idx_exp_rel = np.argsort(proba[mask])[-k_exp:] if k_exp > 0 else np.array([], dtype=int)
+                idx_exp = rem_after_bnd[idx_exp_rel]
+
+                select_idx = np.unique(np.concatenate([idx_div, idx_bnd, idx_exp]))
+                if len(select_idx) < batch_q:
+                    need = batch_q - len(select_idx)
+                    remaining = np.setdiff1d(np.arange(pool_np.shape[0]), select_idx, assume_unique=True)
+                    top_off = remaining[np.argsort(blended_scores[remaining])[-need:]]
+                    select_idx = np.concatenate([select_idx, top_off])
+
+            X_next = pool_np[select_idx]
+        else:
+            # Original behavior: optimize Joint PoF (pool or gradient-based)
+            X_next = suggest_candidates_joint_pof(
+                gp_model, q=batch_q, limits_nat=limit_vec,
+                num_restarts=20, raw_samples=512,
+                use_fast_pool=use_fast_pool, pool_size=pool_size
+            )
+
         t_select = time.time() - t_start
         print(f"[iter {iter_offset + it + 1}] Candidate selection took {t_select:.1f}s")
 
         # Evaluate simulator at proposed points
         t_start = time.time()
+        # Quantize alloying elements to grid if configured
+        X_next = _quantize_raw_floor(X_next, GRID_STEP)
         Y_next = run_simulator(X_next)  # (q,M)
         t_sim = time.time() - t_start
         print(f"[iter {iter_offset + it + 1}] Depletion simulation took {t_sim:.1f}s")

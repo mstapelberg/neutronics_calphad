@@ -54,11 +54,29 @@ class CALPHADBatchCalculator:
         self.temperature = temperature
         # fixed impurities based on NIFS-HEAT 2
         # https://doi.org/10.1016/j.nme.2020.100782
-        self.fixed_impurities = fixed_impurities or {
-            'C': 290e-6,  # 290 appm
-            'N': 440e-6,  # 440 appm
-            'O': 470e-6   # 470 appm 
-        }
+        if fixed_impurities is not None:
+            self.fixed_impurities = fixed_impurities
+        else:
+            # Default impurity values based on NIFS-HEAT 2
+            # https://doi.org/10.1016/j.nme.2020.100782
+            if self.database.upper() == "TCHEA8":
+                self.fixed_impurities = {
+                    'C': 290e-6,  # 290 appm
+                    'N': 440e-6,  # 440 appm
+                    'O': 470e-6   # 470 appm 
+                }
+            elif self.database.upper() == "TCHEA7":
+                self.fixed_impurities = {
+                    'C': 290e-6,  # 290 appm
+                    'N': 440e-6   # 440 appm
+                    # O is omitted for TCHEA7
+                }
+            else:
+                self.fixed_impurities = {
+                    'C': 290e-6,  # 290 appm
+                    'N': 440e-6,  # 440 appm
+                    'O': 470e-6   # 470 appm 
+                }
         self.phase_threshold = phase_threshold
         
         if not TC_AVAILABLE:
@@ -76,6 +94,23 @@ class CALPHADBatchCalculator:
         Returns:
             DataFrame with columns: x_V, x_Cr, ..., phase_count, dominant_phase, single_phase
         """
+        # Handle empty input by returning an empty DataFrame with the expected schema
+        try:
+            n_rows = int(compositions.shape[0])  # type: ignore[attr-defined]
+        except Exception:
+            n_rows = 0
+        if n_rows == 0:
+            cols: Dict[str, pd.Series] = {}
+            for el in elements:
+                cols[f'x_{el}'] = pd.Series(dtype=float)
+            cols.update({
+                'phase_count': pd.Series(dtype=int),
+                'dominant_phase': pd.Series(dtype=str),
+                'single_phase': pd.Series(dtype=bool),
+                'phases': pd.Series(dtype=str),
+            })
+            return pd.DataFrame(cols)
+
         if TC_AVAILABLE:
             try:
                 return self._calculate_batch_tc(compositions, elements)

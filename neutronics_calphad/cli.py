@@ -14,6 +14,7 @@ from . import (
     ARC_D_SHAPE, SPHERICAL
 )
 from .utils.io import cmd_chain_builder, cmd_prepare_data
+from .analysis.refined_space import run_refined_analysis
 
 
 CONFIGS = {
@@ -102,6 +103,26 @@ def cmd_plot_flux(args):
     except Exception as e:
         print(f"❌ Error plotting flux spectrum: {e}")
         sys.exit(1)
+
+def cmd_refined_analysis(args):
+    """Run refined composition-space analysis from CSV inputs.
+
+    Parameters
+    ----------
+    args: argparse.Namespace
+        Parsed arguments containing paths to LightGBM results, CALPHAD candidates,
+        output directory, and optional epsilon.
+    """
+    artifacts = run_refined_analysis(
+        lightgbm_results=args.lightgbm_results,
+        calphad_candidates=args.calphad_candidates,
+        output_dir=args.output_dir,
+        epsilon=args.epsilon,
+        make_3d_plot=not args.no_3d,
+    )
+    print("Refined analysis complete. Artifacts:")
+    for name, path in artifacts.items():
+        print(f" - {name}: {path}")
 
 def cmd_full_workflow(args):
     """Run the complete workflow."""
@@ -270,6 +291,44 @@ def main():
                                 help="Number of parallel workers")
     workflow_parser.set_defaults(func=cmd_full_workflow)
     
+    # Refined analysis command
+    refined_parser = subparsers.add_parser(
+        "refined-analysis",
+        help="Run refined composition-space analysis from CSV inputs",
+        description=(
+            "Run refined analysis using LightGBM results and CALPHAD candidates, "
+            "saving figures and CSV artifacts to the output directory."
+        ),
+    )
+    refined_parser.add_argument(
+        "--lightgbm-results",
+        required=True,
+        help="Path to lightgbm_results.csv",
+    )
+    refined_parser.add_argument(
+        "--calphad-candidates",
+        required=True,
+        help="Path to calphad_candidates.csv",
+    )
+    refined_parser.add_argument(
+        "-o",
+        "--output-dir",
+        required=True,
+        help="Directory to write figures and CSV artifacts",
+    )
+    refined_parser.add_argument(
+        "--epsilon",
+        type=float,
+        default=0.02,
+        help="L1 distance tolerance for approximate intersection (default: 0.02)",
+    )
+    refined_parser.add_argument(
+        "--no-3d",
+        action="store_true",
+        help="Disable 3D refined plot",
+    )
+    refined_parser.set_defaults(func=cmd_refined_analysis)
+
     # Parse and execute
     args = parser.parse_args()
     
