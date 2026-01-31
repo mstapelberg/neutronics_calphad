@@ -1,0 +1,24 @@
+{
+  "tolerance": {
+    "flux_rel_l2": 0.02,
+    "activity_rel_l2": 0.02
+  },
+  "reference": {
+    "particles": 100000,
+    "batches": 100
+  },
+  "target_checked": {
+    "particles": 10000,
+    "batches": 10
+  },
+  "target_flux_dev": 0.013930476540891896,
+  "target_activity_dev": {
+    "V": 0.0059960900813616136,
+    "Zr": 0.00707757358217387,
+    "W": 0.002441828378223894
+  },
+  "recommended_setting": {
+    "particles": 1000,
+    "batches": 50
+  }
+}

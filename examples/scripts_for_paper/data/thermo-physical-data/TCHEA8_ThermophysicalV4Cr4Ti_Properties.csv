@@ -1,0 +1,5 @@
+Temperature,Density,Poisson's Ratio,Young's Modulus,CTE,Thermal Conductivity,Heat Capacity,Yield Strength
+293,6.06,0.36,142,,29.4751,,1101.32889
+673,,,128,10.2,30.9,535,678.90499
+773,,,126.14,10.3,31.86,560,619.15982
+873,,,,10.5,32.75,575,575.1201312
